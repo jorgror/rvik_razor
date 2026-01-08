@@ -1,0 +1,12 @@
+{
+  "domain": "rvik_razor",
+  "name": "RVik Razor",
+  "version": "0.1.0",
+  "documentation": "https://github.com/jorgror/rvik-razor",
+  "requirements": [],
+  "dependencies": [],
+  "codeowners": [],
+  "iot_class": "local_polling",
+  "config_flow": true,
+  "integration_type": "service"
+}

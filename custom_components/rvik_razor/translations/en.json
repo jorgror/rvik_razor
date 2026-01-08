@@ -1,0 +1,121 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up RVik Razor",
+        "description": "Select the energy sensor that tracks your hourly energy consumption.",
+        "data": {
+          "hour_energy_sensor": "Energy this hour sensor"
+        }
+      },
+      "power_sensor": {
+        "title": "Power sensor (optional)",
+        "description": "Select a power sensor for better predictions. This is recommended but not required.",
+        "data": {
+          "house_power_sensor": "House power sensor (optional)"
+        }
+      },
+      "limits": {
+        "title": "Set limits",
+        "description": "Configure the maximum hourly energy limit and operation mode.",
+        "data": {
+          "max_hour_kwh": "Maximum kWh per hour",
+          "mode": "Operation mode"
+        }
+      }
+    },
+    "error": {
+      "entity_not_found": "The selected entity was not found"
+    },
+    "abort": {
+      "no_loads": "No loads configured to remove"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Manage RVik Razor",
+        "menu_options": {
+          "add_load": "Add a load",
+          "remove_load": "Remove a load",
+          "edit_limits": "Edit limits"
+        }
+      },
+      "add_load": {
+        "title": "Add a load",
+        "description": "Configure a new controllable load. Priority determines which loads are reduced first (lower numbers are reduced first).",
+        "data": {
+          "name": "Load name",
+          "type": "Load type",
+          "priority": "Priority (1-100)",
+          "enabled": "Enabled",
+          "enabled_entity": "Enabled entity (optional, e.g., car charging sensor)"
+        }
+      },
+      "add_ev_load": {
+        "title": "Configure EV charger",
+        "description": "Configure the EV charger amperage control settings.",
+        "data": {
+          "ampere_entity": "Ampere control entity",
+          "min_ampere": "Minimum ampere",
+          "max_ampere": "Maximum ampere",
+          "step_ampere": "Ampere step",
+          "power_sensor": "Power sensor (optional)",
+          "assumed_power_kw": "Assumed power when at max (kW, optional)"
+        }
+      },
+      "add_switch_load": {
+        "title": "Configure switch load",
+        "description": "Configure a switch-based load (e.g., heat pump).",
+        "data": {
+          "switch_entity": "Switch entity",
+          "power_sensor": "Power sensor (optional)",
+          "assumed_power_kw": "Assumed power when on (kW, optional)"
+        }
+      },
+      "remove_load": {
+        "title": "Remove a load",
+        "description": "Select a load to remove from the system.",
+        "data": {
+          "load_to_remove": "Load to remove"
+        }
+      },
+      "edit_limits": {
+        "title": "Edit limits",
+        "description": "Update the maximum hourly energy limit and operation mode.",
+        "data": {
+          "max_hour_kwh": "Maximum kWh per hour",
+          "mode": "Operation mode"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "current_hour_kwh": {
+        "name": "Current hour kWh"
+      },
+      "projected_end_hour_kwh": {
+        "name": "Projected end hour kWh"
+      },
+      "needed_reduction_kw": {
+        "name": "Needed reduction"
+      }
+    },
+    "number": {
+      "max_hour_kwh": {
+        "name": "Max hour kWh"
+      }
+    },
+    "select": {
+      "mode": {
+        "name": "Mode",
+        "state": {
+          "off": "Off",
+          "monitor": "Monitor",
+          "control": "Control"
+        }
+      }
+    }
+  }
+}
