@@ -527,91 +527,128 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
         current_enabled = self.current_load.get(CONF_LOAD_ENABLED, True)
         current_enabled_entity = self.current_load.get(CONF_LOAD_ENABLED_ENTITY)
 
-        data_schema = vol.Schema(
-            {
-                vol.Required(
-                    CONF_LOAD_NAME, default=current_name
-                ): selector.TextSelector(),
-                vol.Required(
-                    CONF_LOAD_PRIORITY, default=current_priority
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=1,
-                        max=100,
-                        step=1,
-                        mode=selector.NumberSelectorMode.BOX,
-                    )
-                ),
-                vol.Optional(
-                    CONF_LOAD_ENABLED, default=current_enabled
-                ): selector.BooleanSelector(),
-                vol.Optional(
-                    CONF_LOAD_ENABLED_ENTITY, default=current_enabled_entity
-                ): selector.EntitySelector(
+        # Build schema dynamically to handle None values properly
+        schema_dict: dict[Any, Any] = {
+            vol.Required(CONF_LOAD_NAME, default=current_name): selector.TextSelector(),
+            vol.Required(
+                CONF_LOAD_PRIORITY, default=current_priority
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=1,
+                    max=100,
+                    step=1,
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                CONF_LOAD_ENABLED, default=current_enabled
+            ): selector.BooleanSelector(),
+        }
+
+        # Only add default for enabled_entity if it has a value
+        if current_enabled_entity:
+            schema_dict[
+                vol.Optional(CONF_LOAD_ENABLED_ENTITY, default=current_enabled_entity)
+            ] = selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain=["binary_sensor", "input_boolean"],
+                )
+            )
+        else:
+            schema_dict[vol.Optional(CONF_LOAD_ENABLED_ENTITY)] = (
+                selector.EntitySelector(
                     selector.EntitySelectorConfig(
                         domain=["binary_sensor", "input_boolean"],
                     )
-                ),
-                vol.Required(
-                    CONF_LOAD_AMPERE_ENTITY, default=current_ampere
-                ): selector.EntitySelector(
-                    selector.EntitySelectorConfig(domain="number")
-                ),
-                vol.Optional(
-                    CONF_LOAD_MIN_AMPERE, default=current_min
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=0,
-                        max=32,
-                        step=1,
-                        unit_of_measurement="A",
-                        mode=selector.NumberSelectorMode.BOX,
-                    )
-                ),
-                vol.Optional(
-                    CONF_LOAD_MAX_AMPERE, default=current_max
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=1,
-                        max=80,
-                        step=1,
-                        unit_of_measurement="A",
-                        mode=selector.NumberSelectorMode.BOX,
-                    )
-                ),
-                vol.Required(
-                    CONF_LOAD_PHASES, default=current_phases
-                ): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=[
-                            {"value": "1", "label": "1-phase"},
-                            {"value": "3", "label": "3-phase"},
-                        ],
-                        mode=selector.SelectSelectorMode.DROPDOWN,
-                    )
-                ),
-                vol.Required(
-                    CONF_LOAD_VOLTAGE, default=current_voltage
-                ): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=[
-                            {"value": "230", "label": "230V"},
-                            {"value": "400", "label": "400V"},
-                        ],
-                        mode=selector.SelectSelectorMode.DROPDOWN,
-                    )
-                ),
-                vol.Optional(
-                    CONF_LOAD_POWER_SENSOR, default=current_power
-                ): selector.EntitySelector(
+                )
+            )
+
+        schema_dict[vol.Required(CONF_LOAD_AMPERE_ENTITY, default=current_ampere)] = (
+            selector.EntitySelector(selector.EntitySelectorConfig(domain="number"))
+        )
+
+        schema_dict[vol.Optional(CONF_LOAD_MIN_AMPERE, default=current_min)] = (
+            selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0,
+                    max=32,
+                    step=1,
+                    unit_of_measurement="A",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            )
+        )
+
+        schema_dict[vol.Optional(CONF_LOAD_MAX_AMPERE, default=current_max)] = (
+            selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=1,
+                    max=80,
+                    step=1,
+                    unit_of_measurement="A",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            )
+        )
+
+        schema_dict[vol.Required(CONF_LOAD_PHASES, default=current_phases)] = (
+            selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        {"value": "1", "label": "1-phase"},
+                        {"value": "3", "label": "3-phase"},
+                    ],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            )
+        )
+
+        schema_dict[vol.Required(CONF_LOAD_VOLTAGE, default=current_voltage)] = (
+            selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        {"value": "230", "label": "230V"},
+                        {"value": "400", "label": "400V"},
+                    ],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            )
+        )
+
+        # Only add default for power_sensor if it has a value
+        if current_power:
+            schema_dict[vol.Optional(CONF_LOAD_POWER_SENSOR, default=current_power)] = (
+                selector.EntitySelector(
                     selector.EntitySelectorConfig(
                         domain="sensor",
                         device_class="power",
                     )
-                ),
-                vol.Optional(
-                    CONF_LOAD_ASSUMED_POWER, default=current_assumed
-                ): selector.NumberSelector(
+                )
+            )
+        else:
+            schema_dict[vol.Optional(CONF_LOAD_POWER_SENSOR)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain="sensor",
+                    device_class="power",
+                )
+            )
+
+        # Only add default for assumed_power if it has a value
+        if current_assumed is not None:
+            schema_dict[
+                vol.Optional(CONF_LOAD_ASSUMED_POWER, default=current_assumed)
+            ] = selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0.0,
+                    max=50.0,
+                    step=0.1,
+                    unit_of_measurement="kW",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            )
+        else:
+            schema_dict[vol.Optional(CONF_LOAD_ASSUMED_POWER)] = (
+                selector.NumberSelector(
                     selector.NumberSelectorConfig(
                         min=0.0,
                         max=50.0,
@@ -619,9 +656,10 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
                         unit_of_measurement="kW",
                         mode=selector.NumberSelectorMode.BOX,
                     )
-                ),
-            }
-        )
+                )
+            )
+
+        data_schema = vol.Schema(schema_dict)
 
         return self.async_show_form(
             step_id="edit_ev_load",
@@ -663,50 +701,84 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
         current_enabled = self.current_load.get(CONF_LOAD_ENABLED, True)
         current_enabled_entity = self.current_load.get(CONF_LOAD_ENABLED_ENTITY)
 
-        data_schema = vol.Schema(
-            {
-                vol.Required(
-                    CONF_LOAD_NAME, default=current_name
-                ): selector.TextSelector(),
-                vol.Required(
-                    CONF_LOAD_PRIORITY, default=current_priority
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=1,
-                        max=100,
-                        step=1,
-                        mode=selector.NumberSelectorMode.BOX,
-                    )
-                ),
-                vol.Optional(
-                    CONF_LOAD_ENABLED, default=current_enabled
-                ): selector.BooleanSelector(),
-                vol.Optional(
-                    CONF_LOAD_ENABLED_ENTITY, default=current_enabled_entity
-                ): selector.EntitySelector(
+        # Build schema dynamically to handle None values properly
+        schema_dict: dict[Any, Any] = {
+            vol.Required(CONF_LOAD_NAME, default=current_name): selector.TextSelector(),
+            vol.Required(
+                CONF_LOAD_PRIORITY, default=current_priority
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=1,
+                    max=100,
+                    step=1,
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                CONF_LOAD_ENABLED, default=current_enabled
+            ): selector.BooleanSelector(),
+        }
+
+        # Only add default for enabled_entity if it has a value
+        if current_enabled_entity:
+            schema_dict[
+                vol.Optional(CONF_LOAD_ENABLED_ENTITY, default=current_enabled_entity)
+            ] = selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain=["binary_sensor", "input_boolean"],
+                )
+            )
+        else:
+            schema_dict[vol.Optional(CONF_LOAD_ENABLED_ENTITY)] = (
+                selector.EntitySelector(
                     selector.EntitySelectorConfig(
                         domain=["binary_sensor", "input_boolean"],
                     )
-                ),
-                vol.Required(
-                    CONF_LOAD_SWITCH_ENTITY, default=current_switch
-                ): selector.EntitySelector(
-                    selector.EntitySelectorConfig(domain="switch")
-                ),
-                vol.Optional(
-                    CONF_LOAD_SWITCH_INVERTED, default=current_inverted
-                ): selector.BooleanSelector(),
-                vol.Optional(
-                    CONF_LOAD_POWER_SENSOR, default=current_power
-                ): selector.EntitySelector(
+                )
+            )
+
+        schema_dict[vol.Required(CONF_LOAD_SWITCH_ENTITY, default=current_switch)] = (
+            selector.EntitySelector(selector.EntitySelectorConfig(domain="switch"))
+        )
+
+        schema_dict[
+            vol.Optional(CONF_LOAD_SWITCH_INVERTED, default=current_inverted)
+        ] = selector.BooleanSelector()
+
+        # Only add default for power_sensor if it has a value
+        if current_power:
+            schema_dict[vol.Optional(CONF_LOAD_POWER_SENSOR, default=current_power)] = (
+                selector.EntitySelector(
                     selector.EntitySelectorConfig(
                         domain="sensor",
                         device_class="power",
                     )
-                ),
-                vol.Optional(
-                    CONF_LOAD_ASSUMED_POWER, default=current_assumed
-                ): selector.NumberSelector(
+                )
+            )
+        else:
+            schema_dict[vol.Optional(CONF_LOAD_POWER_SENSOR)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain="sensor",
+                    device_class="power",
+                )
+            )
+
+        # Only add default for assumed_power if it has a value
+        if current_assumed is not None:
+            schema_dict[
+                vol.Optional(CONF_LOAD_ASSUMED_POWER, default=current_assumed)
+            ] = selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0.0,
+                    max=50.0,
+                    step=0.1,
+                    unit_of_measurement="kW",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            )
+        else:
+            schema_dict[vol.Optional(CONF_LOAD_ASSUMED_POWER)] = (
+                selector.NumberSelector(
                     selector.NumberSelectorConfig(
                         min=0.0,
                         max=50.0,
@@ -714,9 +786,10 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
                         unit_of_measurement="kW",
                         mode=selector.NumberSelectorMode.BOX,
                     )
-                ),
-            }
-        )
+                )
+            )
+
+        data_schema = vol.Schema(schema_dict)
 
         return self.async_show_form(
             step_id="edit_switch_load",
