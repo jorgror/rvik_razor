@@ -69,6 +69,7 @@
         "description": "Configure a switch-based load (e.g., heat pump). Either power sensor or assumed power is recommended for accurate regulation.",
         "data": {
           "switch_entity": "Switch entity",
+          "switch_inverted": "Inverted (consumes power when OFF)",
           "power_sensor": "Power sensor (optional, for accurate measurements)",
           "assumed_power_kw": "Assumed power when on (optional, if no sensor)"
         }
@@ -99,6 +100,7 @@
           "enabled": "Enabled",
           "enabled_entity": "Enabled entity (optional, e.g., car charging sensor)",
           "switch_entity": "Switch entity",
+          "switch_inverted": "Inverted (consumes power when OFF)",
           "power_sensor": "Power sensor (optional, for accurate measurements)",
           "assumed_power_kw": "Assumed power when on (optional, if no sensor)"
         }

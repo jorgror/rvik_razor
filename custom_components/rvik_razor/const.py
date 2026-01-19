@@ -33,6 +33,7 @@ CONF_LOAD_VOLTAGE = "voltage"
 
 # Switch-specific configuration
 CONF_LOAD_SWITCH_ENTITY = "switch_entity"
+CONF_LOAD_SWITCH_INVERTED = "switch_inverted"
 
 # Default values
 DEFAULT_MAX_HOUR_KWH = 5.0
@@ -89,6 +90,7 @@ class Load:
 
     # Switch-specific fields
     switch_entity_id: str | None = None
+    switch_inverted: bool = False  # If True, switch consumes power when OFF
 
     # Runtime state
     last_action_time: float = 0.0
@@ -113,6 +115,7 @@ class Load:
             CONF_LOAD_PHASES: self.phases,
             CONF_LOAD_VOLTAGE: self.voltage,
             CONF_LOAD_SWITCH_ENTITY: self.switch_entity_id,
+            CONF_LOAD_SWITCH_INVERTED: self.switch_inverted,
         }
 
     @staticmethod
@@ -132,6 +135,7 @@ class Load:
             phases=data.get(CONF_LOAD_PHASES, DEFAULT_PHASES),
             voltage=data.get(CONF_LOAD_VOLTAGE, DEFAULT_VOLTAGE),
             switch_entity_id=data.get(CONF_LOAD_SWITCH_ENTITY),
+            switch_inverted=data.get(CONF_LOAD_SWITCH_INVERTED, False),
         )
 
 

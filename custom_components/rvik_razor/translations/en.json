@@ -69,6 +69,7 @@
         "description": "Configure a switch-based load (e.g., heat pump).",
         "data": {
           "switch_entity": "Switch entity",
+          "switch_inverted": "Inverted (consumes power when OFF)",
           "power_sensor": "Power sensor (optional)",
           "assumed_power_kw": "Assumed power when on (kW, optional)"
         }

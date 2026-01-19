@@ -212,11 +212,13 @@ def _calculate_switch_reduction(load: Load) -> dict[str, Any] | None:
     """Calculate switch reduction."""
     # For switches, we know the reduction from config
     reduction_kw = load.assumed_power_kw if load.assumed_power_kw else 0.0
+    # For inverted switches, we turn ON to reduce power (OFF consumes power)
+    new_value = "on" if load.switch_inverted else "off"
     return {
         "load": load,
         "type": "switch",
         "reduction_kw": reduction_kw,
-        "new_value": "off",
+        "new_value": new_value,
     }
 
 
@@ -602,17 +604,32 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return 0.0
 
     async def _async_reduce_switch_load(self, load: Load) -> float:
-        """Turn off switch load."""
+        """Reduce switch load (turn off normal, turn on inverted)."""
         if not load.switch_entity_id:
             return 0.0
 
         state = self.hass.states.get(load.switch_entity_id)
-        if not state or state.state != "on":
-            return 0.0  # Already off
+        if not state:
+            return 0.0
+
+        # For inverted switches: power is consumed when OFF, so we turn ON to reduce
+        # For normal switches: power is consumed when ON, so we turn OFF to reduce
+        if load.switch_inverted:
+            # Inverted: check if already ON (already reduced)
+            if state.state == "on":
+                return 0.0
+            target_state = "on"
+            target_service = "turn_on"
+        else:
+            # Normal: check if already OFF (already reduced)
+            if state.state != "on":
+                return 0.0
+            target_state = "off"
+            target_service = "turn_off"
 
         # Store original value if not already stored
         if load.original_value is None:
-            load.original_value = "on"
+            load.original_value = state.state
 
         # Determine power reduction
         power_kw = 0.0
@@ -625,18 +642,23 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         elif load.assumed_power_kw:
             power_kw = load.assumed_power_kw
 
-        # Turn off switch
+        # Execute switch action
         try:
             await self.hass.services.async_call(
                 "switch",
-                "turn_off",
+                target_service,
                 {"entity_id": load.switch_entity_id},
                 blocking=True,
             )
-            _LOGGER.info("Turned off %s (estimated %.2fkW)", load.name, power_kw)
+            _LOGGER.info(
+                "Switched %s to %s (estimated %.2fkW reduction)",
+                load.name,
+                target_state,
+                power_kw,
+            )
             return power_kw
         except Exception as err:
-            _LOGGER.error("Failed to turn off %s: %s", load.name, err)
+            _LOGGER.error("Failed to switch %s: %s", load.name, err)
             return 0.0
 
     async def _async_execute_restorations(
@@ -674,15 +696,21 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if load.load_type == LoadType.EV_AMPERE and load.ampere_number_entity_id:
                 return await self._async_restore_ev_load(load, available_margin_kwh)
             elif load.load_type == LoadType.SWITCH and load.switch_entity_id:
-                # Always turn on when restoring (or use original_value if set)
-                if load.original_value is None or load.original_value == "on":
+                # Restore to original state
+                if load.original_value is not None:
+                    restore_service = (
+                        "turn_on" if load.original_value == "on" else "turn_off"
+                    )
                     await self.hass.services.async_call(
                         "switch",
-                        "turn_on",
+                        restore_service,
                         {"entity_id": load.switch_entity_id},
                         blocking=True,
                     )
-                    _LOGGER.info("Restored %s to ON", load.name)
+                    _LOGGER.info(
+                        "Restored %s to %s", load.name, load.original_value.upper()
+                    )
+                    load.original_value = None
                     return True
         except Exception as err:
             _LOGGER.error("Failed to restore %s: %s", load.name, err)

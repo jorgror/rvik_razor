@@ -25,6 +25,7 @@ from .const import (
     CONF_LOAD_POWER_SENSOR,
     CONF_LOAD_PRIORITY,
     CONF_LOAD_SWITCH_ENTITY,
+    CONF_LOAD_SWITCH_INVERTED,
     CONF_LOAD_TYPE,
     CONF_LOAD_VOLTAGE,
     CONF_LOADS,
@@ -456,6 +457,9 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
                 vol.Required(CONF_LOAD_SWITCH_ENTITY): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="switch")
                 ),
+                vol.Optional(
+                    CONF_LOAD_SWITCH_INVERTED, default=False
+                ): selector.BooleanSelector(),
                 vol.Optional(CONF_LOAD_POWER_SENSOR): selector.EntitySelector(
                     selector.EntitySelectorConfig(
                         domain="sensor",
@@ -651,6 +655,7 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
 
         # Get current values for defaults
         current_switch = self.current_load.get(CONF_LOAD_SWITCH_ENTITY, "")
+        current_inverted = self.current_load.get(CONF_LOAD_SWITCH_INVERTED, False)
         current_power = self.current_load.get(CONF_LOAD_POWER_SENSOR)
         current_assumed = self.current_load.get(CONF_LOAD_ASSUMED_POWER)
         current_name = self.current_load.get(CONF_LOAD_NAME, "")
@@ -688,6 +693,9 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
                 ): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="switch")
                 ),
+                vol.Optional(
+                    CONF_LOAD_SWITCH_INVERTED, default=current_inverted
+                ): selector.BooleanSelector(),
                 vol.Optional(
                     CONF_LOAD_POWER_SENSOR, default=current_power
                 ): selector.EntitySelector(
