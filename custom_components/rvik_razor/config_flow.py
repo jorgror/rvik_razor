@@ -515,17 +515,17 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data={})
 
         # Get current values for defaults
-        current_ampere = self.current_load.get(CONF_LOAD_AMPERE_ENTITY, "")
+        current_ampere = self.current_load.get(CONF_LOAD_AMPERE_ENTITY) or ""
         current_min = self.current_load.get(CONF_LOAD_MIN_AMPERE, DEFAULT_MIN_AMPERE)
         current_max = self.current_load.get(CONF_LOAD_MAX_AMPERE, DEFAULT_MAX_AMPERE)
         current_phases = str(self.current_load.get(CONF_LOAD_PHASES, DEFAULT_PHASES))
         current_voltage = str(self.current_load.get(CONF_LOAD_VOLTAGE, DEFAULT_VOLTAGE))
-        current_power = self.current_load.get(CONF_LOAD_POWER_SENSOR)
+        current_power = self.current_load.get(CONF_LOAD_POWER_SENSOR) or None
         current_assumed = self.current_load.get(CONF_LOAD_ASSUMED_POWER)
-        current_name = self.current_load.get(CONF_LOAD_NAME, "")
+        current_name = self.current_load.get(CONF_LOAD_NAME) or ""
         current_priority = self.current_load.get(CONF_LOAD_PRIORITY, 1)
         current_enabled = self.current_load.get(CONF_LOAD_ENABLED, True)
-        current_enabled_entity = self.current_load.get(CONF_LOAD_ENABLED_ENTITY)
+        current_enabled_entity = self.current_load.get(CONF_LOAD_ENABLED_ENTITY) or None
 
         # Build schema dynamically to handle None values properly
         schema_dict: dict[Any, Any] = {
@@ -545,8 +545,8 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
             ): selector.BooleanSelector(),
         }
 
-        # Only add default for enabled_entity if it has a value
-        if current_enabled_entity:
+        # Only add default for enabled_entity if it has a valid value
+        if current_enabled_entity and current_enabled_entity != "None":
             schema_dict[
                 vol.Optional(CONF_LOAD_ENABLED_ENTITY, default=current_enabled_entity)
             ] = selector.EntitySelector(
@@ -615,8 +615,8 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
             )
         )
 
-        # Only add default for power_sensor if it has a value
-        if current_power:
+        # Only add default for power_sensor if it has a valid value
+        if current_power and current_power != "None":
             schema_dict[vol.Optional(CONF_LOAD_POWER_SENSOR, default=current_power)] = (
                 selector.EntitySelector(
                     selector.EntitySelectorConfig(
@@ -633,8 +633,8 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
                 )
             )
 
-        # Only add default for assumed_power if it has a value
-        if current_assumed is not None:
+        # Only add default for assumed_power if it has a valid value
+        if current_assumed is not None and current_assumed != 0:
             schema_dict[
                 vol.Optional(CONF_LOAD_ASSUMED_POWER, default=current_assumed)
             ] = selector.NumberSelector(
@@ -692,14 +692,14 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data={})
 
         # Get current values for defaults
-        current_switch = self.current_load.get(CONF_LOAD_SWITCH_ENTITY, "")
+        current_switch = self.current_load.get(CONF_LOAD_SWITCH_ENTITY) or ""
         current_inverted = self.current_load.get(CONF_LOAD_SWITCH_INVERTED, False)
-        current_power = self.current_load.get(CONF_LOAD_POWER_SENSOR)
+        current_power = self.current_load.get(CONF_LOAD_POWER_SENSOR) or None
         current_assumed = self.current_load.get(CONF_LOAD_ASSUMED_POWER)
-        current_name = self.current_load.get(CONF_LOAD_NAME, "")
+        current_name = self.current_load.get(CONF_LOAD_NAME) or ""
         current_priority = self.current_load.get(CONF_LOAD_PRIORITY, 1)
         current_enabled = self.current_load.get(CONF_LOAD_ENABLED, True)
-        current_enabled_entity = self.current_load.get(CONF_LOAD_ENABLED_ENTITY)
+        current_enabled_entity = self.current_load.get(CONF_LOAD_ENABLED_ENTITY) or None
 
         # Build schema dynamically to handle None values properly
         schema_dict: dict[Any, Any] = {
@@ -719,8 +719,8 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
             ): selector.BooleanSelector(),
         }
 
-        # Only add default for enabled_entity if it has a value
-        if current_enabled_entity:
+        # Only add default for enabled_entity if it has a valid value
+        if current_enabled_entity and current_enabled_entity != "None":
             schema_dict[
                 vol.Optional(CONF_LOAD_ENABLED_ENTITY, default=current_enabled_entity)
             ] = selector.EntitySelector(
@@ -745,8 +745,8 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
             vol.Optional(CONF_LOAD_SWITCH_INVERTED, default=current_inverted)
         ] = selector.BooleanSelector()
 
-        # Only add default for power_sensor if it has a value
-        if current_power:
+        # Only add default for power_sensor if it has a valid value
+        if current_power and current_power != "None":
             schema_dict[vol.Optional(CONF_LOAD_POWER_SENSOR, default=current_power)] = (
                 selector.EntitySelector(
                     selector.EntitySelectorConfig(
@@ -763,8 +763,8 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
                 )
             )
 
-        # Only add default for assumed_power if it has a value
-        if current_assumed is not None:
+        # Only add default for assumed_power if it has a valid value
+        if current_assumed is not None and current_assumed != 0:
             schema_dict[
                 vol.Optional(CONF_LOAD_ASSUMED_POWER, default=current_assumed)
             ] = selector.NumberSelector(
