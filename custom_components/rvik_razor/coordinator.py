@@ -161,7 +161,9 @@ def calculate_regulation_decision(
                 restorable_loads, key=lambda x: x.priority, reverse=True
             )
 
-            # Only restore one at a time to avoid overshooting
+            # Collect all loads not in cooldown - we'll try each until one succeeds
+            # This handles cases where higher priority loads are already at max
+            eligible_loads = []
             for load in sorted_loads:
                 # Check cooldown
                 time_since_action = current_time - load.last_action_time
@@ -172,14 +174,16 @@ def calculate_regulation_decision(
                         cooldown - time_since_action,
                     )
                     continue
+                eligible_loads.append(load)
 
-                result["loads_to_restore"] = [load]
+            if eligible_loads:
+                result["loads_to_restore"] = eligible_loads
+                load_names = [l.name for l in eligible_loads]
                 result["reason"] = (
-                    f"Sufficient margin ({max_hour_kwh - projected_end_kwh:.2f}kWh), restoring {load.name}"
+                    f"Sufficient margin ({max_hour_kwh - projected_end_kwh:.2f}kWh), "
+                    f"eligible loads (by priority): {', '.join(load_names)}"
                 )
-                break
-
-            if not result["loads_to_restore"]:
+            else:
                 result["action"] = "none"
                 result["reason"] = "Margin available but all loads in cooldown"
         else:
@@ -598,9 +602,7 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Target power = current power - needed reduction
         target_power_kw = max(0, current_power_kw - needed_reduction)
         target_ampere = (
-            target_power_kw / power_per_ampere
-            if power_per_ampere > 0
-            else entity_min
+            target_power_kw / power_per_ampere if power_per_ampere > 0 else entity_min
         )
 
         # Ensure we stay within bounds and round to integer
