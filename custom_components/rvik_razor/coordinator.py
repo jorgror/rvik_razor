@@ -146,6 +146,13 @@ def calculate_regulation_decision(
         # (i.e., are currently below max consumption)
         restorable_loads = [load for load in loads if load.enabled]
 
+        _LOGGER.debug(
+            "Restore check: %d enabled loads, margin=%.2fkWh (restore_margin=%.2fkWh)",
+            len(restorable_loads),
+            max_hour_kwh - projected_end_kwh,
+            restore_margin,
+        )
+
         if restorable_loads:
             result["action"] = "restore"
 
@@ -157,7 +164,13 @@ def calculate_regulation_decision(
             # Only restore one at a time to avoid overshooting
             for load in sorted_loads:
                 # Check cooldown
-                if current_time - load.last_action_time < cooldown:
+                time_since_action = current_time - load.last_action_time
+                if time_since_action < cooldown:
+                    _LOGGER.debug(
+                        "Load %s in cooldown for restore (%.0fs remaining)",
+                        load.name,
+                        cooldown - time_since_action,
+                    )
                     continue
 
                 result["loads_to_restore"] = [load]
@@ -410,6 +423,18 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Update effective enabled state for each load based on enabled_entity_id
         self._update_loads_enabled_state()
 
+        # Log current state before decision
+        _LOGGER.debug(
+            "Control state: projected=%.2fkWh, max=%.2fkWh, margin=%.2fkWh, "
+            "needed_reduction=%.2fkW, current_power=%.2fkW, remaining_mins=%.1f",
+            projected_end_kwh,
+            max_hour_kwh,
+            max_hour_kwh - projected_end_kwh,
+            needed_reduction_kw,
+            current_power_kw if current_power_kw else 0.0,
+            remaining_minutes if remaining_minutes else 0.0,
+        )
+
         # Use the pure function to calculate what to do
         decision = calculate_regulation_decision(
             loads=self.loads,
@@ -420,6 +445,19 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             current_power_kw=current_power_kw,
             remaining_minutes=remaining_minutes,
         )
+
+        # Log decision details
+        _LOGGER.debug(
+            "Regulation decision: action=%s, reason=%s",
+            decision["action"],
+            decision["reason"],
+        )
+        if decision["loads_to_restore"]:
+            load_names = [l.name for l in decision["loads_to_restore"]]
+            _LOGGER.debug("Loads selected for restoration: %s", load_names)
+        if decision["loads_to_reduce"]:
+            load_names = [p["load"].name for p in decision["loads_to_reduce"]]
+            _LOGGER.debug("Loads selected for reduction: %s", load_names)
 
         # Execute the decision
         if decision["action"] == "reduce":
@@ -490,8 +528,8 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return 0.0  # Already at minimum
 
         # Get actual current power from power sensor if available
-        current_power_kw = None
-        power_per_ampere = None
+        current_power_kw: float = 0.0
+        power_per_ampere: float | None = None
 
         if load.power_sensor_entity_id:
             power_state = self.hass.states.get(load.power_sensor_entity_id)
@@ -668,13 +706,29 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         actions_taken = []
         available_margin_kwh = max_hour_kwh - projected_end_kwh
 
+        _LOGGER.debug(
+            "Executing restorations: %d loads to restore, available_margin=%.2fkWh",
+            len(loads_to_restore),
+            available_margin_kwh,
+        )
+
         for load in loads_to_restore:
+            _LOGGER.debug(
+                "Attempting to restore load %s (type=%s)",
+                load.name,
+                load.load_type,
+            )
             # Try to restore this load (maximize consumption)
             if await self._async_restore_single_load(load, available_margin_kwh):
                 load.last_action_time = current_time
                 actions_taken.append(load.name)
                 # Only restore one at a time to avoid overshooting
                 break
+            else:
+                _LOGGER.debug(
+                    "Load %s was not restored (already at max or restore failed)",
+                    load.name,
+                )
 
         if actions_taken:
             self.last_action = "Restored loads"
@@ -798,6 +852,15 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 power_per_ampere,
             )
 
+        _LOGGER.debug(
+            "%s restore check: current=%dA, entity_min=%d, entity_max=%d, power_per_A=%.2fkW/A",
+            load.name,
+            current_ampere,
+            entity_min,
+            entity_max,
+            power_per_ampere,
+        )
+
         # Calculate time remaining in hour to convert margin to power
         now = datetime.now()
         next_hour = (now + timedelta(hours=1)).replace(
@@ -819,12 +882,30 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             target_ampere = entity_max
 
+        _LOGGER.debug(
+            "%s restore calc: margin=%.2fkWh, remaining_secs=%.0f, available_power=%.2fkW, "
+            "raw_target=%.1fA",
+            load.name,
+            available_margin_kwh,
+            remaining_seconds,
+            available_power_kw,
+            target_ampere,
+        )
+
         # Clamp to entity's min/max range and round to integer
         target_ampere = min(entity_max, max(entity_min, target_ampere))
         new_ampere = round(target_ampere)
 
         # Final bounds check to ensure we're within entity limits
         new_ampere = min(entity_max, max(entity_min, new_ampere))
+
+        _LOGGER.debug(
+            "%s restore target: clamped_target=%.1fA, new_ampere=%d, current=%d",
+            load.name,
+            target_ampere,
+            new_ampere,
+            current_ampere,
+        )
 
         # Ensure we're actually increasing (don't decrease when restoring)
         if new_ampere <= current_ampere:
