@@ -56,8 +56,6 @@
         "description": "Configure the EV charger amperage control settings. Power will be calculated from ampere/voltage/phases if no sensor provided.",
         "data": {
           "ampere_entity": "Ampere control entity",
-          "min_ampere": "Minimum ampere",
-          "max_ampere": "Maximum ampere",
           "phases": "Number of phases",
           "voltage": "Voltage",
           "power_sensor": "Power sensor (optional, for accurate measurements)",
@@ -83,8 +81,6 @@
           "enabled": "Enabled",
           "enabled_entity": "Enabled entity (optional, e.g., car charging sensor)",
           "ampere_entity": "Ampere control entity",
-          "min_ampere": "Minimum ampere",
-          "max_ampere": "Maximum ampere",
           "phases": "Number of phases",
           "voltage": "Voltage",
           "power_sensor": "Power sensor (optional, for accurate measurements)",

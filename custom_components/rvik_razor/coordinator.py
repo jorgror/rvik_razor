@@ -20,6 +20,8 @@ from .const import (
     DEFAULT_RESTORE_MARGIN,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
+    FALLBACK_MAX_AMPERE,
+    FALLBACK_MIN_AMPERE,
     Load,
     LoadType,
     OperationMode,
@@ -480,9 +482,9 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         current_ampere = float(state.state)
 
-        # Get the actual min/max from the entity to avoid out_of_range errors
-        entity_min = state.attributes.get("min", load.min_ampere)
-        entity_max = state.attributes.get("max", load.max_ampere)
+        # Get the actual min/max from the entity (these can change dynamically)
+        entity_min = state.attributes.get("min", FALLBACK_MIN_AMPERE)
+        entity_max = state.attributes.get("max", FALLBACK_MAX_AMPERE)
 
         if current_ampere <= entity_min:
             return 0.0  # Already at minimum
@@ -560,7 +562,7 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         target_ampere = (
             target_power_kw / power_per_ampere
             if power_per_ampere > 0
-            else load.min_ampere
+            else entity_min
         )
 
         # Ensure we stay within bounds and round to integer
@@ -749,9 +751,9 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         current_ampere = float(state.state)
 
-        # Get the actual min/max from the entity to avoid out_of_range errors
-        entity_min = state.attributes.get("min", load.min_ampere)
-        entity_max = state.attributes.get("max", load.max_ampere)
+        # Get the actual min/max from the entity (these can change dynamically)
+        entity_min = state.attributes.get("min", FALLBACK_MIN_AMPERE)
+        entity_max = state.attributes.get("max", FALLBACK_MAX_AMPERE)
 
         # Get power per ampere ratio
         power_per_ampere = None

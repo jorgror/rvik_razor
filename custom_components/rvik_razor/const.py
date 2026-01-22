@@ -26,8 +26,6 @@ CONF_LOAD_ASSUMED_POWER = "assumed_power_kw"
 
 # EV-specific configuration
 CONF_LOAD_AMPERE_ENTITY = "ampere_entity"
-CONF_LOAD_MIN_AMPERE = "min_ampere"
-CONF_LOAD_MAX_AMPERE = "max_ampere"
 CONF_LOAD_PHASES = "phases"
 CONF_LOAD_VOLTAGE = "voltage"
 
@@ -41,10 +39,11 @@ DEFAULT_MODE = "monitor"
 DEFAULT_UPDATE_INTERVAL = 30  # seconds
 DEFAULT_COOLDOWN = 120  # seconds
 DEFAULT_RESTORE_MARGIN = 0.1  # kWh
-DEFAULT_MIN_AMPERE = 6
-DEFAULT_MAX_AMPERE = 32
 DEFAULT_PHASES = 3
 DEFAULT_VOLTAGE = 400
+# Fallback ampere limits when entity doesn't provide them
+FALLBACK_MIN_AMPERE = 0
+FALLBACK_MAX_AMPERE = 16
 
 # Coordinator data keys
 DATA_COORDINATOR = "coordinator"
@@ -83,8 +82,6 @@ class Load:
 
     # EV-specific fields
     ampere_number_entity_id: str | None = None
-    min_ampere: int = DEFAULT_MIN_AMPERE
-    max_ampere: int = DEFAULT_MAX_AMPERE
     phases: int = DEFAULT_PHASES  # 1 or 3 phase
     voltage: int = DEFAULT_VOLTAGE  # 230 or 400 volt
 
@@ -109,8 +106,6 @@ class Load:
             CONF_LOAD_POWER_SENSOR: self.power_sensor_entity_id,
             CONF_LOAD_ASSUMED_POWER: self.assumed_power_kw,
             CONF_LOAD_AMPERE_ENTITY: self.ampere_number_entity_id,
-            CONF_LOAD_MIN_AMPERE: self.min_ampere,
-            CONF_LOAD_MAX_AMPERE: self.max_ampere,
             CONF_LOAD_PHASES: self.phases,
             CONF_LOAD_VOLTAGE: self.voltage,
             CONF_LOAD_SWITCH_ENTITY: self.switch_entity_id,
@@ -129,8 +124,6 @@ class Load:
             power_sensor_entity_id=data.get(CONF_LOAD_POWER_SENSOR),
             assumed_power_kw=data.get(CONF_LOAD_ASSUMED_POWER),
             ampere_number_entity_id=data.get(CONF_LOAD_AMPERE_ENTITY),
-            min_ampere=data.get(CONF_LOAD_MIN_AMPERE, DEFAULT_MIN_AMPERE),
-            max_ampere=data.get(CONF_LOAD_MAX_AMPERE, DEFAULT_MAX_AMPERE),
             phases=data.get(CONF_LOAD_PHASES, DEFAULT_PHASES),
             voltage=data.get(CONF_LOAD_VOLTAGE, DEFAULT_VOLTAGE),
             switch_entity_id=data.get(CONF_LOAD_SWITCH_ENTITY),

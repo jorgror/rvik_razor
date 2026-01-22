@@ -244,7 +244,6 @@ class TestRegulationDecisions:
                 name="EV Charger",
                 priority=50,
                 load_type=LoadType.EV_AMPERE,
-                min_ampere=6,
                 ampere_number_entity_id="number.ev_charger",
             ),
         ]

@@ -18,8 +18,6 @@ from .const import (
     CONF_LOAD_ASSUMED_POWER,
     CONF_LOAD_ENABLED,
     CONF_LOAD_ENABLED_ENTITY,
-    CONF_LOAD_MAX_AMPERE,
-    CONF_LOAD_MIN_AMPERE,
     CONF_LOAD_NAME,
     CONF_LOAD_PHASES,
     CONF_LOAD_POWER_SENSOR,
@@ -31,9 +29,7 @@ from .const import (
     CONF_LOADS,
     CONF_MAX_HOUR_KWH,
     CONF_MODE,
-    DEFAULT_MAX_AMPERE,
     DEFAULT_MAX_HOUR_KWH,
-    DEFAULT_MIN_AMPERE,
     DEFAULT_MODE,
     DEFAULT_PHASES,
     DEFAULT_VOLTAGE,
@@ -361,28 +357,6 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
                 vol.Required(CONF_LOAD_AMPERE_ENTITY): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="number")
                 ),
-                vol.Optional(
-                    CONF_LOAD_MIN_AMPERE, default=DEFAULT_MIN_AMPERE
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=0,
-                        max=32,
-                        step=1,
-                        unit_of_measurement="A",
-                        mode=selector.NumberSelectorMode.BOX,
-                    )
-                ),
-                vol.Optional(
-                    CONF_LOAD_MAX_AMPERE, default=DEFAULT_MAX_AMPERE
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=1,
-                        max=80,
-                        step=1,
-                        unit_of_measurement="A",
-                        mode=selector.NumberSelectorMode.BOX,
-                    )
-                ),
                 vol.Required(
                     CONF_LOAD_PHASES, default=DEFAULT_PHASES
                 ): selector.SelectSelector(
@@ -516,8 +490,6 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
 
         # Get current values for defaults
         current_ampere = self.current_load.get(CONF_LOAD_AMPERE_ENTITY) or ""
-        current_min = self.current_load.get(CONF_LOAD_MIN_AMPERE, DEFAULT_MIN_AMPERE)
-        current_max = self.current_load.get(CONF_LOAD_MAX_AMPERE, DEFAULT_MAX_AMPERE)
         current_phases = str(self.current_load.get(CONF_LOAD_PHASES, DEFAULT_PHASES))
         current_voltage = str(self.current_load.get(CONF_LOAD_VOLTAGE, DEFAULT_VOLTAGE))
         current_power = self.current_load.get(CONF_LOAD_POWER_SENSOR) or None
@@ -565,30 +537,6 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
 
         schema_dict[vol.Required(CONF_LOAD_AMPERE_ENTITY, default=current_ampere)] = (
             selector.EntitySelector(selector.EntitySelectorConfig(domain="number"))
-        )
-
-        schema_dict[vol.Optional(CONF_LOAD_MIN_AMPERE, default=current_min)] = (
-            selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=0,
-                    max=32,
-                    step=1,
-                    unit_of_measurement="A",
-                    mode=selector.NumberSelectorMode.BOX,
-                )
-            )
-        )
-
-        schema_dict[vol.Optional(CONF_LOAD_MAX_AMPERE, default=current_max)] = (
-            selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=1,
-                    max=80,
-                    step=1,
-                    unit_of_measurement="A",
-                    mode=selector.NumberSelectorMode.BOX,
-                )
-            )
         )
 
         schema_dict[vol.Required(CONF_LOAD_PHASES, default=current_phases)] = (

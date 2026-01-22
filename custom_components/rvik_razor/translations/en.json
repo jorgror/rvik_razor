@@ -57,9 +57,8 @@
         "description": "Configure the EV charger amperage control settings.",
         "data": {
           "ampere_entity": "Ampere control entity",
-          "min_ampere": "Minimum ampere",
-          "max_ampere": "Maximum ampere",
-          "step_ampere": "Ampere step",
+          "phases": "Number of phases",
+          "voltage": "Voltage",
           "power_sensor": "Power sensor (optional)",
           "assumed_power_kw": "Assumed power when at max (kW, optional)"
         }

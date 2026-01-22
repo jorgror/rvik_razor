@@ -27,7 +27,6 @@ def create_ev_charger(priority: int = 50) -> Load:
         priority=priority,
         load_type=LoadType.EV_AMPERE,
         enabled=True,
-        min_ampere=6,
         ampere_number_entity_id="number.ev_charger",
         assumed_power_kw=11.0,  # 3-phase 16A at 400V
     )
