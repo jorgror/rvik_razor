@@ -873,24 +873,31 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if remaining_seconds <= 0:
             remaining_seconds = 3600  # Default to full hour if calculation fails
 
-        # Convert available margin (kWh) to available power (kW)
-        # available_margin_kwh = power_kw * (remaining_seconds / 3600)
-        # So: power_kw = available_margin_kwh * 3600 / remaining_seconds
-        available_power_kw = (available_margin_kwh * 3600.0) / remaining_seconds
+        # Convert available margin (kWh) to additional power we can add (kW)
+        # available_margin_kwh = additional_power_kw * (remaining_seconds / 3600)
+        # So: additional_power_kw = available_margin_kwh * 3600 / remaining_seconds
+        additional_power_kw = (available_margin_kwh * 3600.0) / remaining_seconds
 
-        # Calculate target amperage based on available power
+        # Calculate current power consumption
+        current_power_kw = current_ampere * power_per_ampere
+
+        # Target is current + additional power we can use (up to entity max)
         if power_per_ampere > 0:
-            target_ampere = available_power_kw / power_per_ampere
+            # We can add additional_power_kw worth of amperes to current
+            additional_ampere = additional_power_kw / power_per_ampere
+            target_ampere = current_ampere + additional_ampere
         else:
             target_ampere = entity_max
 
         _LOGGER.debug(
-            "%s restore calc: margin=%.2fkWh, remaining_secs=%.0f, available_power=%.2fkW, "
-            "raw_target=%.1fA",
+            "%s restore calc: margin=%.2fkWh, remaining_secs=%.0f, additional_power=%.2fkW, "
+            "current=%.1fA + additional=%.1fA = target=%.1fA",
             load.name,
             available_margin_kwh,
             remaining_seconds,
-            available_power_kw,
+            additional_power_kw,
+            current_ampere,
+            additional_power_kw / power_per_ampere if power_per_ampere > 0 else 0,
             target_ampere,
         )
 
@@ -931,12 +938,12 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 blocking=True,
             )
             _LOGGER.info(
-                "Restored %s from %dA to %dA (margin: %.2fkWh, available power: %.2fkW)",
+                "Restored %s from %dA to %dA (margin: %.2fkWh, additional power: %.2fkW)",
                 load.name,
                 current_ampere,
                 new_ampere,
                 available_margin_kwh,
-                available_power_kw,
+                additional_power_kw,
             )
             return True
         except Exception as err:
