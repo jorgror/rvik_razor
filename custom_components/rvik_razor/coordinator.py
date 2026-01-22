@@ -140,6 +140,8 @@ def calculate_regulation_decision(
             )
             return result
 
+        # Consider all enabled loads - we'll check if they can be restored
+        # (i.e., are currently below max consumption)
         restorable_loads = [load for load in loads if load.enabled]
 
         if restorable_loads:
@@ -482,10 +484,6 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         entity_min = state.attributes.get("min", load.min_ampere)
         entity_max = state.attributes.get("max", load.max_ampere)
 
-        # Store original value if not already stored
-        if load.original_value is None:
-            load.original_value = current_ampere
-
         if current_ampere <= entity_min:
             return 0.0  # Already at minimum
 
@@ -627,10 +625,6 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             target_state = "off"
             target_service = "turn_off"
 
-        # Store original value if not already stored
-        if load.original_value is None:
-            load.original_value = state.state
-
         # Determine power reduction
         power_kw = 0.0
         if load.power_sensor_entity_id:
@@ -673,10 +667,9 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         available_margin_kwh = max_hour_kwh - projected_end_kwh
 
         for load in loads_to_restore:
-            # Try to restore this load
+            # Try to restore this load (maximize consumption)
             if await self._async_restore_single_load(load, available_margin_kwh):
                 load.last_action_time = current_time
-                load.original_value = None  # Clear stored value
                 actions_taken.append(load.name)
                 # Only restore one at a time to avoid overshooting
                 break
@@ -696,38 +689,47 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if load.load_type == LoadType.EV_AMPERE and load.ampere_number_entity_id:
                 return await self._async_restore_ev_load(load, available_margin_kwh)
             elif load.load_type == LoadType.SWITCH and load.switch_entity_id:
-                # Restore to original state
-                if load.original_value is not None:
-                    restore_service = (
-                        "turn_on" if load.original_value == "on" else "turn_off"
-                    )
-                    await self.hass.services.async_call(
-                        "switch",
-                        restore_service,
-                        {"entity_id": load.switch_entity_id},
-                        blocking=True,
-                    )
-                    _LOGGER.info(
-                        "Restored %s to %s", load.name, load.original_value.upper()
-                    )
-                    load.original_value = None
-                    return True
+                # Restore to max consumption state (ON for normal, OFF for inverted)
+                state = self.hass.states.get(load.switch_entity_id)
+                if not state:
+                    return False
+
+                # Determine target state for max consumption
+                if load.switch_inverted:
+                    # Inverted: consumes power when OFF
+                    if state.state == "off":
+                        return False  # Already at max consumption
+                    restore_service = "turn_off"
+                    target_state = "OFF"
+                else:
+                    # Normal: consumes power when ON
+                    if state.state == "on":
+                        return False  # Already at max consumption
+                    restore_service = "turn_on"
+                    target_state = "ON"
+
+                await self.hass.services.async_call(
+                    "switch",
+                    restore_service,
+                    {"entity_id": load.switch_entity_id},
+                    blocking=True,
+                )
+                _LOGGER.info(
+                    "Restored %s to %s (max consumption)", load.name, target_state
+                )
+                return True
         except Exception as err:
             _LOGGER.error("Failed to restore %s: %s", load.name, err)
 
         return False
 
     async def _async_restore_all_loads(self, reason: str) -> None:
-        """Restore all loads (used when mode is OFF)."""
+        """Restore all loads to max consumption (used when mode is OFF)."""
         restored = []
         for load in self.loads:
-            if load.original_value is not None:
-                # Pass large margin since we're restoring everything
-                if await self._async_restore_single_load(
-                    load, available_margin_kwh=999.0
-                ):
-                    load.original_value = None
-                    restored.append(load.name)
+            # Pass large margin since we're restoring everything to max
+            if await self._async_restore_single_load(load, available_margin_kwh=999.0):
+                restored.append(load.name)
 
         if restored:
             self.last_action = "Restored all loads"

@@ -124,7 +124,6 @@ def simulate_hour_scenario():
                 load = plan["load"]
                 print(f"   - {load.name} (priority {load.priority})")
                 # Simulate the reduction
-                load.original_value = "on"  # Mark as reduced
                 load.last_action_time = current_time
 
         if decision["loads_to_restore"]:
@@ -132,7 +131,6 @@ def simulate_hour_scenario():
             for load in decision["loads_to_restore"]:
                 print(f"   - {load.name} (priority {load.priority})")
                 # Simulate the restoration
-                load.original_value = None
                 load.last_action_time = current_time
 
         # Advance time for next iteration
@@ -224,7 +222,6 @@ def test_restore_margin():
     print("=" * 80)
 
     load = create_pool_pump()
-    load.original_value = "on"  # Previously reduced
 
     max_hour_kwh = 5.0
     restore_margin = 0.5

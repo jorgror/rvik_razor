@@ -21,7 +21,6 @@ def create_test_load(
     load_type: LoadType = LoadType.SWITCH,
     enabled: bool = True,
     enabled_entity_id: str | None = None,
-    original_value: Any | None = None,
     last_action_time: float = 0.0,
     assumed_power_kw: float = 2.0,
     **kwargs,
@@ -33,7 +32,6 @@ def create_test_load(
         load_type=load_type,
         enabled=enabled,
         enabled_entity_id=enabled_entity_id,
-        original_value=original_value,
         last_action_time=last_action_time,
         assumed_power_kw=assumed_power_kw,
         **kwargs,
@@ -89,13 +87,11 @@ class TestRegulationDecisions:
             create_test_load(
                 name="Load 1",
                 priority=10,
-                original_value="on",
                 assumed_power_kw=2.0,
             ),
             create_test_load(
                 name="Load 2",
                 priority=20,
-                original_value="on",
                 assumed_power_kw=3.0,
             ),
         ]
@@ -197,12 +193,10 @@ class TestRegulationDecisions:
             create_test_load(
                 name="Load 1",
                 priority=10,
-                original_value="on",
             ),
             create_test_load(
                 name="Load 2",
                 priority=20,
-                original_value="on",
             ),
         ]
         current_time = time.time()
@@ -220,13 +214,12 @@ class TestRegulationDecisions:
         # Should only restore one load at a time
         assert len(decision["loads_to_restore"]) == 1
 
-    def test_restore_loads_even_without_original_value(self):
-        """Test that any enabled load can be restored regardless of original_value."""
+    def test_restore_any_enabled_load(self):
+        """Test that any enabled load can be restored to max consumption."""
         loads = [
             create_test_load(
-                name="No Original",
+                name="Enabled Load",
                 priority=10,
-                original_value=None,  # Never reduced by system
             ),
         ]
         current_time = time.time()
@@ -295,7 +288,6 @@ class TestRegulationDecisions:
             create_test_load(
                 name="Load 1",
                 priority=10,
-                original_value="on",
                 assumed_power_kw=2.0,
             ),
         ]
@@ -344,7 +336,7 @@ class TestRegulationEdgeCases:
 
     def test_restore_margin_boundary(self):
         """Test behavior at exact restore margin boundary."""
-        loads = [create_test_load(original_value="on")]
+        loads = [create_test_load()]
         current_time = time.time()
         restore_margin = 0.5
         max_hour_kwh = 5.0

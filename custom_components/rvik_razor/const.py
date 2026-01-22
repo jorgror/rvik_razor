@@ -94,7 +94,6 @@ class Load:
 
     # Runtime state
     last_action_time: float = 0.0
-    original_value: Any = None
     measured_power_per_ampere: float | None = (
         None  # Stored kW/A ratio from actual measurements
     )
