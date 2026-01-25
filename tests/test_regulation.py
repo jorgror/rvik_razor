@@ -190,7 +190,7 @@ class TestRegulationDecisions:
 
     def test_only_one_load_restored_at_time(self):
         """Test that loads are returned in priority order for restoration.
-        
+
         The decision function returns all eligible loads sorted by priority,
         and the execution phase restores only one at a time.
         """
@@ -495,20 +495,20 @@ class TestIncidentRecreation:
 
     def test_incident_2026_01_25_heat_pump_not_reduced(self):
         """Recreate incident: heat pump (pri 3, inverted switch) not turned off.
-        
+
         Scenario:
         - 2 EV chargers at priority 1 and 2
         - 1 heat pump at priority 3, inverted switch, no assumed_power_kw set
         - Heat pump has power sensor showing ~2kW consumption
         - EVs were reduced to 0, but heat pump wasn't turned off
         - Result: exceeded the limit
-        
-        The bug: When assumed_power_kw is not set for a switch, 
+
+        The bug: When assumed_power_kw is not set for a switch,
         _calculate_switch_reduction returns reduction_kw=0.0, which means
         the planning phase doesn't account for the actual reduction potential.
         """
         current_time = time.time()
-        
+
         loads = [
             # EV charger 1 - priority 1 (lowest, cut first)
             Load(
@@ -544,7 +544,7 @@ class TestIncidentRecreation:
                 current_switch_state="off",  # Currently consuming power
             ),
         ]
-        
+
         # Need 3kW reduction - more than EVs alone can provide at 0A
         decision = calculate_regulation_decision(
             loads=loads,
@@ -553,15 +553,15 @@ class TestIncidentRecreation:
             max_hour_kwh=5.0,
             current_time=current_time,
         )
-        
+
         assert decision["action"] == "reduce"
-        
+
         # All 3 loads should be in the reduction plan
         load_names = [p["load"].name for p in decision["loads_to_reduce"]]
         assert "EV Charger 1" in load_names, "EV1 should be in reduction plan"
         assert "EV Charger 2" in load_names, "EV2 should be in reduction plan"
         assert "Heat Pump" in load_names, "Heat pump should be in reduction plan"
-        
+
         # The heat pump's reduction_kw should reflect actual potential, not 0
         heat_pump_plan = next(
             p for p in decision["loads_to_reduce"] if p["load"].name == "Heat Pump"
@@ -570,20 +570,20 @@ class TestIncidentRecreation:
         # This test documents the current (buggy) behavior
         # When fixed, the heat pump should report its actual power consumption
         print(f"Heat pump reduction_kw in plan: {heat_pump_plan['reduction_kw']}")
-        
+
         # For now, just verify the heat pump IS in the plan
         # The actual execution will read from power sensor
         assert heat_pump_plan is not None
 
     def test_switch_with_power_sensor_but_no_assumed_power(self):
         """Test that switches with power sensor but no assumed_power still get reduced.
-        
+
         The planning phase can't know the actual power (needs HA state),
         so reduction_kw will be 0.0. But the switch should still be in the plan
         and the actual power should be determined during execution.
         """
         current_time = time.time()
-        
+
         # Single switch load with power sensor but no assumed_power
         load = Load(
             name="Test Switch",
@@ -596,7 +596,7 @@ class TestIncidentRecreation:
             assumed_power_kw=None,
             current_switch_state="on",  # Currently consuming power
         )
-        
+
         decision = calculate_regulation_decision(
             loads=[load],
             needed_reduction_kw=2.0,
@@ -604,28 +604,30 @@ class TestIncidentRecreation:
             max_hour_kwh=5.0,
             current_time=current_time,
         )
-        
+
         assert decision["action"] == "reduce"
         assert len(decision["loads_to_reduce"]) == 1
-        
+
         # The reduction_kw will be 0.0 because assumed_power_kw is None
         # This is a limitation of the pure function approach
         plan = decision["loads_to_reduce"][0]
-        assert plan["reduction_kw"] == 0.0, "Without assumed_power_kw, reduction_kw is 0"
-        
+        assert (
+            plan["reduction_kw"] == 0.0
+        ), "Without assumed_power_kw, reduction_kw is 0"
+
         # But remaining_reduction should still be > 0 because we couldn't account for it
-        assert decision["remaining_reduction"] == 2.0, (
-            "Remaining reduction should be unchanged since switch has 0 reduction_kw"
-        )
+        assert (
+            decision["remaining_reduction"] == 2.0
+        ), "Remaining reduction should be unchanged since switch has 0 reduction_kw"
 
     def test_switch_plan_has_needed_reduction_key(self):
         """Test that switch reduction plans include needed_reduction key.
-        
+
         BUG: Switch plans didn't include 'needed_reduction' key but the execution
         code tries to access plan['needed_reduction'], causing KeyError.
         """
         current_time = time.time()
-        
+
         load = Load(
             name="Test Switch",
             load_type=LoadType.SWITCH,
@@ -636,7 +638,7 @@ class TestIncidentRecreation:
             assumed_power_kw=2.0,
             current_switch_state="on",
         )
-        
+
         decision = calculate_regulation_decision(
             loads=[load],
             needed_reduction_kw=3.0,
@@ -644,14 +646,394 @@ class TestIncidentRecreation:
             max_hour_kwh=5.0,
             current_time=current_time,
         )
-        
+
         assert len(decision["loads_to_reduce"]) == 1
         plan = decision["loads_to_reduce"][0]
-        
+
         # This should NOT raise KeyError - the key should exist
-        assert "needed_reduction" in plan, (
-            "Switch plans must include 'needed_reduction' key to avoid KeyError in execution"
+        assert (
+            "needed_reduction" in plan
+        ), "Switch plans must include 'needed_reduction' key to avoid KeyError in execution"
+
+
+class TestTimeoutLoadBehavior:
+    """Test that loads on timeout with reduction capacity cause waiting.
+
+    When a lower priority load is on timeout but COULD be reduced (has capacity),
+    we should wait for its cooldown rather than reducing a higher priority load.
+    This avoids unnecessary wear on high priority equipment.
+    """
+
+    def test_wait_for_low_priority_cooldown_instead_of_reducing_high_priority(self):
+        """Test that we wait for low priority load cooldown instead of reducing high priority.
+
+        Scenario:
+        - Low priority load (pri=10) is ON and on cooldown (recently restored)
+        - High priority load (pri=50) is ON
+        - We need 2kW reduction
+        - Low priority load could provide 3kW if reduced
+
+        Expected: Wait for low priority cooldown, don't reduce high priority
+        """
+        current_time = time.time()
+
+        loads = [
+            # Low priority - ON, on cooldown, but has capacity to be reduced
+            create_test_load(
+                name="Low Priority",
+                priority=10,
+                assumed_power_kw=3.0,  # Can provide 3kW reduction
+                last_action_time=current_time - 60,  # 1 minute ago (in timeout)
+                timeout=120,  # 2 min timeout
+                current_switch_state="on",  # Currently consuming - CAN be reduced
+            ),
+            # High priority - ON, not on cooldown
+            create_test_load(
+                name="High Priority",
+                priority=50,
+                assumed_power_kw=3.0,
+                last_action_time=0,  # Not in timeout
+                current_switch_state="on",  # Currently consuming power
+            ),
+        ]
+
+        decision = calculate_regulation_decision(
+            loads=loads,
+            needed_reduction_kw=2.0,  # Need 2kW reduction
+            projected_end_kwh=6.0,
+            max_hour_kwh=5.0,
+            current_time=current_time,
         )
+
+        # The low priority load CAN provide the needed reduction once cooldown expires.
+        # We should NOT reduce the high priority load - wait for cooldown instead.
+        load_names = [p["load"].name for p in decision["loads_to_reduce"]]
+        assert "High Priority" not in load_names, (
+            "High priority load should NOT be reduced when low priority "
+            "load on cooldown has enough capacity to provide the reduction"
+        )
+        # The reason should indicate we're waiting for cooldown
+        assert (
+            "waiting" in decision["reason"].lower()
+            or "cooldown" in decision["reason"].lower()
+        ), f"Reason should mention waiting for cooldown: {decision['reason']}"
+
+    def test_reduce_high_priority_when_low_priority_cannot_provide_enough(self):
+        """Test that we reduce high priority when low priority can't cover the need.
+
+        Scenario:
+        - Low priority load (pri=10) is ON, on cooldown, can provide 1kW
+        - High priority load (pri=50) is ON, not on cooldown
+        - We need 3kW reduction
+        - Low priority can only provide 1kW - not enough!
+
+        Expected: Reduce high priority load (low priority can't cover the need)
+        """
+        current_time = time.time()
+
+        loads = [
+            # Low priority - can only provide 1kW
+            create_test_load(
+                name="Low Priority",
+                priority=10,
+                assumed_power_kw=1.0,  # Only 1kW capacity
+                last_action_time=current_time - 60,
+                timeout=120,
+                current_switch_state="on",
+            ),
+            # High priority
+            create_test_load(
+                name="High Priority",
+                priority=50,
+                assumed_power_kw=3.0,
+                last_action_time=0,
+                current_switch_state="on",
+            ),
+        ]
+
+        decision = calculate_regulation_decision(
+            loads=loads,
+            needed_reduction_kw=3.0,  # Need 3kW, low priority only has 1kW
+            projected_end_kwh=6.0,
+            max_hour_kwh=5.0,
+            current_time=current_time,
+        )
+
+        # Low priority cannot cover the full need, so high priority must be reduced
+        assert decision["action"] == "reduce"
+        load_names = [p["load"].name for p in decision["loads_to_reduce"]]
+        assert (
+            "High Priority" in load_names
+        ), "High priority should be reduced when low priority can't provide enough"
+
+    def test_reduce_high_priority_when_low_priority_already_reduced(self):
+        """Test that we reduce high priority when low priority is already reduced.
+
+        Scenario:
+        - Low priority load (pri=10) is already OFF (reduced), on cooldown
+        - High priority load (pri=50) is ON
+        - We need 2kW reduction
+
+        Expected: Reduce high priority - low priority is already off, nothing more to give
+        """
+        current_time = time.time()
+
+        loads = [
+            # Low priority - already OFF (reduced), no more capacity
+            create_test_load(
+                name="Low Priority",
+                priority=10,
+                assumed_power_kw=3.0,
+                last_action_time=current_time - 60,
+                timeout=120,
+                current_switch_state="off",  # Already reduced - no capacity left
+            ),
+            # High priority - ON
+            create_test_load(
+                name="High Priority",
+                priority=50,
+                assumed_power_kw=3.0,
+                last_action_time=0,
+                current_switch_state="on",
+            ),
+        ]
+
+        decision = calculate_regulation_decision(
+            loads=loads,
+            needed_reduction_kw=2.0,
+            projected_end_kwh=6.0,
+            max_hour_kwh=5.0,
+            current_time=current_time,
+        )
+
+        # Low priority is already off - high priority must be reduced
+        assert decision["action"] == "reduce"
+        load_names = [p["load"].name for p in decision["loads_to_reduce"]]
+        assert (
+            "High Priority" in load_names
+        ), "High priority should be reduced when low priority is already off"
+
+    def test_multiple_low_priority_loads_cover_reduction(self):
+        """Test that multiple low priority loads on cooldown together can cover reduction.
+
+        Scenario:
+        - Pri 10: 1.5kW capacity, on cooldown
+        - Pri 20: 1.5kW capacity, on cooldown
+        - Pri 50: 3kW capacity, not on cooldown
+        - Need 2.5kW
+
+        Expected: Wait - pri 10 + pri 20 = 3kW > 2.5kW needed
+        """
+        current_time = time.time()
+
+        loads = [
+            create_test_load(
+                name="Low Pri 1",
+                priority=10,
+                assumed_power_kw=1.5,
+                last_action_time=current_time - 60,
+                timeout=120,
+                current_switch_state="on",  # Can be reduced
+            ),
+            create_test_load(
+                name="Low Pri 2",
+                priority=20,
+                assumed_power_kw=1.5,
+                last_action_time=current_time - 60,
+                timeout=120,
+                current_switch_state="on",  # Can be reduced
+            ),
+            create_test_load(
+                name="High Priority",
+                priority=50,
+                assumed_power_kw=3.0,
+                last_action_time=0,
+                current_switch_state="on",
+            ),
+        ]
+
+        decision = calculate_regulation_decision(
+            loads=loads,
+            needed_reduction_kw=2.5,  # Low pri 1 + 2 = 3kW > 2.5kW needed
+            projected_end_kwh=6.0,
+            max_hour_kwh=5.0,
+            current_time=current_time,
+        )
+
+        # Combined low priority loads can cover the need
+        load_names = [p["load"].name for p in decision["loads_to_reduce"]]
+        assert "High Priority" not in load_names, (
+            "High priority should not be reduced - combined low priority loads "
+            "on cooldown can cover the needed reduction"
+        )
+
+    def test_inverted_switch_on_cooldown_can_provide_reduction(self):
+        """Test inverted switch on cooldown is correctly assessed for capacity.
+
+        For inverted switches: OFF = consuming power, ON = reduced
+        So if inverted switch is OFF and on cooldown, it CAN be reduced (turned ON).
+        """
+        current_time = time.time()
+
+        loads = [
+            # Inverted switch - OFF means consuming (can be reduced by turning ON)
+            create_test_load(
+                name="Low Priority Inverted",
+                priority=10,
+                assumed_power_kw=3.0,
+                last_action_time=current_time - 60,
+                timeout=120,
+                switch_inverted=True,
+                current_switch_state="off",  # OFF = consuming for inverted, CAN reduce
+            ),
+            create_test_load(
+                name="High Priority",
+                priority=50,
+                assumed_power_kw=3.0,
+                last_action_time=0,
+                current_switch_state="on",
+            ),
+        ]
+
+        decision = calculate_regulation_decision(
+            loads=loads,
+            needed_reduction_kw=2.0,
+            projected_end_kwh=6.0,
+            max_hour_kwh=5.0,
+            current_time=current_time,
+        )
+
+        # Inverted switch at OFF can be turned ON to reduce - wait for cooldown
+        load_names = [p["load"].name for p in decision["loads_to_reduce"]]
+        assert "High Priority" not in load_names, (
+            "High priority should not be reduced - inverted switch on cooldown "
+            "can provide the reduction once cooldown expires"
+        )
+
+    def test_ev_charger_on_cooldown_with_capacity(self):
+        """Test EV charger on cooldown with remaining amperage capacity.
+
+        If an EV charger is at 10A and on cooldown, it can still be reduced to 0A.
+        """
+        current_time = time.time()
+
+        loads = [
+            # EV charger at 10A - can be reduced further
+            Load(
+                name="EV Charger",
+                load_type=LoadType.EV_AMPERE,
+                priority=10,
+                enabled=True,
+                ampere_number_entity_id="number.ev_charger",
+                phases=3,
+                voltage=400,
+                last_action_time=current_time - 60,
+                timeout=120,
+                current_ampere=10,  # Can still be reduced to 0
+            ),
+            create_test_load(
+                name="High Priority",
+                priority=50,
+                assumed_power_kw=3.0,
+                last_action_time=0,
+                current_switch_state="on",
+            ),
+        ]
+
+        decision = calculate_regulation_decision(
+            loads=loads,
+            needed_reduction_kw=2.0,
+            projected_end_kwh=6.0,
+            max_hour_kwh=5.0,
+            current_time=current_time,
+        )
+
+        # EV charger can still be reduced - wait for its cooldown
+        load_names = [p["load"].name for p in decision["loads_to_reduce"]]
+        assert "High Priority" not in load_names, (
+            "High priority should not be reduced - EV charger on cooldown "
+            "has capacity to reduce once cooldown expires"
+        )
+
+    def test_ev_charger_on_cooldown_at_minimum(self):
+        """Test EV charger on cooldown already at minimum.
+
+        If EV is at 0A and on cooldown, it has no more capacity.
+        """
+        current_time = time.time()
+
+        loads = [
+            # EV charger already at 0A - no more capacity
+            Load(
+                name="EV Charger",
+                load_type=LoadType.EV_AMPERE,
+                priority=10,
+                enabled=True,
+                ampere_number_entity_id="number.ev_charger",
+                phases=3,
+                voltage=400,
+                last_action_time=current_time - 60,
+                timeout=120,
+                current_ampere=0,  # Already at minimum
+            ),
+            create_test_load(
+                name="High Priority",
+                priority=50,
+                assumed_power_kw=3.0,
+                last_action_time=0,
+                current_switch_state="on",
+            ),
+        ]
+
+        decision = calculate_regulation_decision(
+            loads=loads,
+            needed_reduction_kw=2.0,
+            projected_end_kwh=6.0,
+            max_hour_kwh=5.0,
+            current_time=current_time,
+        )
+
+        # EV is at 0A - no capacity left, must reduce high priority
+        assert decision["action"] == "reduce"
+        load_names = [p["load"].name for p in decision["loads_to_reduce"]]
+        assert (
+            "High Priority" in load_names
+        ), "High priority must be reduced when EV at minimum has no capacity"
+
+    def test_no_waiting_when_no_loads_on_cooldown(self):
+        """Test normal reduction when no loads are on cooldown."""
+        current_time = time.time()
+
+        loads = [
+            create_test_load(
+                name="Low Priority",
+                priority=10,
+                assumed_power_kw=3.0,
+                last_action_time=0,  # Not on cooldown
+                current_switch_state="on",
+            ),
+            create_test_load(
+                name="High Priority",
+                priority=50,
+                assumed_power_kw=3.0,
+                last_action_time=0,
+                current_switch_state="on",
+            ),
+        ]
+
+        decision = calculate_regulation_decision(
+            loads=loads,
+            needed_reduction_kw=2.0,
+            projected_end_kwh=6.0,
+            max_hour_kwh=5.0,
+            current_time=current_time,
+        )
+
+        # Low priority should be reduced normally (not on cooldown)
+        assert decision["action"] == "reduce"
+        load_names = [p["load"].name for p in decision["loads_to_reduce"]]
+        assert "Low Priority" in load_names
+        assert "High Priority" not in load_names
 
 
 if __name__ == "__main__":

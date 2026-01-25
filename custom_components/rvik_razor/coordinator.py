@@ -113,6 +113,10 @@ def calculate_regulation_decision(
         remaining_reduction = needed_reduction_kw
         loads_to_reduce = []
 
+        # Track loads on cooldown that have reduction potential
+        # These are loads we should wait for instead of reducing higher priority loads
+        loads_on_cooldown_with_capacity = []
+
         for load in sorted_loads:
             if remaining_reduction <= 0.01:
                 _LOGGER.debug(
@@ -124,16 +128,53 @@ def calculate_regulation_decision(
             # Check cooldown (use per-load timeout)
             load_timeout = load.timeout
             if current_time - load.last_action_time < load_timeout:
-                _LOGGER.debug(
-                    "Load %s in cooldown, skipping (%.0fs remaining)",
-                    load.name,
-                    load_timeout - (current_time - load.last_action_time),
-                )
+                # Load is on cooldown - check if it has reduction potential
+                potential = _calculate_load_reduction_potential(load)
+                if potential > 0:
+                    loads_on_cooldown_with_capacity.append(
+                        {
+                            "load": load,
+                            "potential_kw": potential,
+                            "cooldown_remaining": load_timeout
+                            - (current_time - load.last_action_time),
+                        }
+                    )
+                    _LOGGER.debug(
+                        "Load %s in cooldown (%.0fs remaining), has %.2fkW reduction potential",
+                        load.name,
+                        load_timeout - (current_time - load.last_action_time),
+                        potential,
+                    )
+                else:
+                    _LOGGER.debug(
+                        "Load %s in cooldown, no reduction potential (already reduced)",
+                        load.name,
+                    )
                 continue
 
             # Calculate what reduction this load can provide
             reduction_info = _calculate_load_reduction(load, remaining_reduction)
             if reduction_info:
+                # Before adding this load to reduction list, check if lower priority
+                # loads on cooldown could provide enough reduction
+                # (lower priority = already processed, so check accumulated potential)
+                total_cooldown_potential = sum(
+                    lc["potential_kw"] for lc in loads_on_cooldown_with_capacity
+                )
+
+                if total_cooldown_potential >= remaining_reduction:
+                    # Lower priority loads on cooldown can cover the remaining need
+                    # Don't reduce this higher priority load - wait for cooldown
+                    _LOGGER.debug(
+                        "Load %s (pri=%d): skipping - lower priority loads on cooldown "
+                        "have %.2fkW potential >= %.2fkW needed",
+                        load.name,
+                        load.priority,
+                        total_cooldown_potential,
+                        remaining_reduction,
+                    )
+                    continue
+
                 loads_to_reduce.append(reduction_info)
                 _LOGGER.debug(
                     "Load %s (pri=%d): planned reduction=%.2fkW, remaining=%.2fkW -> %.2fkW",
@@ -154,9 +195,26 @@ def calculate_regulation_decision(
         result["loads_to_reduce"] = loads_to_reduce
         result["remaining_reduction"] = remaining_reduction
 
+        # Determine the reason based on what happened
+        total_cooldown_potential = sum(
+            lc["potential_kw"] for lc in loads_on_cooldown_with_capacity
+        )
+
         if loads_to_reduce:
             result["reason"] = (
                 f"Need {needed_reduction_kw:.2f}kW reduction, planning to reduce {len(loads_to_reduce)} load(s)"
+            )
+        elif total_cooldown_potential >= needed_reduction_kw:
+            # No loads to reduce because we're waiting for cooldown
+            cooldown_names = [lc["load"].name for lc in loads_on_cooldown_with_capacity]
+            min_cooldown = min(
+                lc["cooldown_remaining"] for lc in loads_on_cooldown_with_capacity
+            )
+            result["action"] = "none"  # Change action to none - we're waiting
+            result["reason"] = (
+                f"Need {needed_reduction_kw:.2f}kW reduction, waiting for cooldown on "
+                f"{', '.join(cooldown_names)} (potential: {total_cooldown_potential:.2f}kW, "
+                f"next available in {min_cooldown:.0f}s)"
             )
         else:
             result["reason"] = (
@@ -229,6 +287,52 @@ def calculate_regulation_decision(
         )
 
     return result
+
+
+def _calculate_load_reduction_potential(load: Load) -> float:
+    """Calculate the potential reduction capacity of a load.
+
+    This determines how much power reduction a load COULD provide if reduced,
+    based on its current state.
+
+    Returns the potential reduction in kW, or 0 if already fully reduced.
+    """
+    if load.load_type == LoadType.SWITCH:
+        # For switches, check if it's in a state that can be reduced
+        if load.switch_inverted:
+            # Inverted: OFF = consuming, ON = reduced
+            # Can reduce if currently OFF
+            if load.current_switch_state == "off":
+                return load.assumed_power_kw or 0.0
+            else:
+                # Already ON (reduced) or unknown
+                return 0.0
+        else:
+            # Normal: ON = consuming, OFF = reduced
+            # Can reduce if currently ON
+            if load.current_switch_state == "on":
+                return load.assumed_power_kw or 0.0
+            else:
+                # Already OFF (reduced) or unknown
+                return 0.0
+    elif load.load_type == LoadType.EV_AMPERE:
+        # For EV chargers, check current amperage
+        if load.current_ampere is not None and load.current_ampere > 0:
+            # Calculate potential reduction from current amperage
+            # Use stored power ratio or calculate from config
+            if load.measured_power_per_ampere is not None:
+                return load.current_ampere * load.measured_power_per_ampere
+            else:
+                # Calculate from configured phases and voltage
+                if load.phases == 3:
+                    power_per_ampere = (load.voltage * 1.732) / 1000.0
+                else:
+                    power_per_ampere = load.voltage / 1000.0
+                return load.current_ampere * power_per_ampere
+        else:
+            # Already at 0A or unknown
+            return 0.0
+    return 0.0
 
 
 def _calculate_load_reduction(
