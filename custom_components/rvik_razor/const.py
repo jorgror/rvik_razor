@@ -94,6 +94,8 @@ class Load:
     measured_power_per_ampere: float | None = (
         None  # Stored kW/A ratio from actual measurements
     )
+    current_switch_state: str | None = None  # Current state of switch ("on", "off", etc.)
+    current_ampere: float | None = None  # Current ampere setting for EV chargers
 
     def to_dict(self) -> dict[str, Any]:
         """Convert load to dictionary for storage."""

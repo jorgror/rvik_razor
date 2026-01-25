@@ -97,12 +97,28 @@ def calculate_regulation_decision(
             [load for load in loads if load.enabled],
             key=lambda x: x.priority,
         )
+        
+        # Log which loads are available for reduction
+        _LOGGER.debug(
+            "Loads available for reduction (enabled): %s",
+            [(l.name, f"pri={l.priority}", l.load_type) for l in sorted_loads],
+        )
+        disabled_loads = [l for l in loads if not l.enabled]
+        if disabled_loads:
+            _LOGGER.debug(
+                "Loads excluded (disabled): %s",
+                [(l.name, f"pri={l.priority}") for l in disabled_loads],
+            )
 
         remaining_reduction = needed_reduction_kw
         loads_to_reduce = []
 
         for load in sorted_loads:
             if remaining_reduction <= 0.01:
+                _LOGGER.debug(
+                    "Remaining reduction %.3fkW <= 0.01, stopping load selection",
+                    remaining_reduction,
+                )
                 break
 
             # Check cooldown
@@ -118,7 +134,21 @@ def calculate_regulation_decision(
             reduction_info = _calculate_load_reduction(load, remaining_reduction)
             if reduction_info:
                 loads_to_reduce.append(reduction_info)
+                _LOGGER.debug(
+                    "Load %s (pri=%d): planned reduction=%.2fkW, remaining=%.2fkW -> %.2fkW",
+                    load.name,
+                    load.priority,
+                    reduction_info["reduction_kw"],
+                    remaining_reduction,
+                    remaining_reduction - reduction_info["reduction_kw"],
+                )
                 remaining_reduction -= reduction_info["reduction_kw"]
+            else:
+                _LOGGER.debug(
+                    "Load %s (pri=%d): cannot reduce (already at minimum or unavailable)",
+                    load.name,
+                    load.priority,
+                )
 
         result["loads_to_reduce"] = loads_to_reduce
         result["remaining_reduction"] = remaining_reduction
@@ -210,7 +240,7 @@ def _calculate_load_reduction(
     if load.load_type == LoadType.EV_AMPERE:
         return _calculate_ev_reduction(load, needed_reduction)
     elif load.load_type == LoadType.SWITCH:
-        return _calculate_switch_reduction(load)
+        return _calculate_switch_reduction(load, needed_reduction)
     return None
 
 
@@ -229,17 +259,45 @@ def _calculate_ev_reduction(
     }
 
 
-def _calculate_switch_reduction(load: Load) -> dict[str, Any] | None:
-    """Calculate switch reduction."""
+def _calculate_switch_reduction(load: Load, needed_reduction: float) -> dict[str, Any] | None:
+    """Calculate switch reduction.
+    
+    Returns None if the switch is already in the reduced state.
+    If current_switch_state is None (unknown), assume it can be reduced.
+    """
+    # For inverted switches, we turn ON to reduce power (OFF consumes power)
+    # For normal switches, we turn OFF to reduce power (ON consumes power)
+    if load.switch_inverted:
+        # Inverted: reduced state is ON, consuming state is OFF
+        target_state = "on"
+        # If already ON, nothing to reduce
+        # If state is None (unknown), assume we can try to reduce
+        if load.current_switch_state == "on":
+            _LOGGER.debug(
+                "%s: inverted switch already ON (reduced state), skipping",
+                load.name,
+            )
+            return None
+    else:
+        # Normal: reduced state is OFF, consuming state is ON
+        target_state = "off"
+        # If state is known and NOT "on", it's already reduced
+        # If state is None (unknown), assume we can try to reduce
+        if load.current_switch_state is not None and load.current_switch_state != "on":
+            _LOGGER.debug(
+                "%s: switch already OFF (reduced state), skipping",
+                load.name,
+            )
+            return None
+    
     # For switches, we know the reduction from config
     reduction_kw = load.assumed_power_kw if load.assumed_power_kw else 0.0
-    # For inverted switches, we turn ON to reduce power (OFF consumes power)
-    new_value = "on" if load.switch_inverted else "off"
     return {
         "load": load,
         "type": "switch",
         "reduction_kw": reduction_kw,
-        "new_value": new_value,
+        "new_value": target_state,
+        "needed_reduction": needed_reduction,
     }
 
 
@@ -281,15 +339,18 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._load_config()
         _LOGGER.info("Configuration updated, reloaded %d loads", len(self.loads))
 
-    def _update_loads_enabled_state(self) -> None:
-        """Update enabled state for loads based on their enabled_entity_id.
+    def _update_loads_runtime_state(self) -> None:
+        """Update runtime state for loads from Home Assistant entities.
 
-        If a load has an enabled_entity_id configured, check the entity's state
-        to determine if the load should be considered enabled for regulation.
-        This allows dynamic control of load participation (e.g., only regulate
-        an EV charger when the car is actually charging).
+        Updates:
+        - enabled state from enabled_entity_id
+        - current_switch_state for switch loads
+        - current_ampere for EV loads
+        
+        This ensures the pure regulation functions have current state information.
         """
         for load in self.loads:
+            # Update enabled state from enabled_entity_id
             if load.enabled_entity_id:
                 state = self.hass.states.get(load.enabled_entity_id)
                 if state is None or state.state in ("unknown", "unavailable"):
@@ -311,6 +372,36 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         entity_enabled,
                     )
                     load.enabled = entity_enabled
+            
+            # Update current switch state for switch loads
+            if load.load_type == LoadType.SWITCH and load.switch_entity_id:
+                switch_state = self.hass.states.get(load.switch_entity_id)
+                if switch_state and switch_state.state not in ("unknown", "unavailable"):
+                    load.current_switch_state = switch_state.state
+                    _LOGGER.debug(
+                        "Load %s: switch state is %s (inverted=%s)",
+                        load.name,
+                        load.current_switch_state,
+                        load.switch_inverted,
+                    )
+                else:
+                    load.current_switch_state = None
+                    _LOGGER.debug(
+                        "Load %s: switch entity %s unavailable",
+                        load.name,
+                        load.switch_entity_id,
+                    )
+            
+            # Update current ampere for EV loads
+            if load.load_type == LoadType.EV_AMPERE and load.ampere_number_entity_id:
+                ampere_state = self.hass.states.get(load.ampere_number_entity_id)
+                if ampere_state and ampere_state.state not in ("unknown", "unavailable"):
+                    try:
+                        load.current_ampere = float(ampere_state.state)
+                    except (ValueError, TypeError):
+                        load.current_ampere = None
+                else:
+                    load.current_ampere = None
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from sensors and calculate needed actions."""
@@ -424,8 +515,8 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Execute control actions based on needed reduction."""
         current_time = time.time()
 
-        # Update effective enabled state for each load based on enabled_entity_id
-        self._update_loads_enabled_state()
+        # Update runtime state for each load (enabled state, switch state, ampere values)
+        self._update_loads_runtime_state()
 
         # Log current state before decision
         _LOGGER.debug(
@@ -481,18 +572,31 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> None:
         """Execute load reductions based on calculated plans."""
         actions_taken = []
+        failed_actions = []
+
+        _LOGGER.info(
+            "Executing %d reduction plans: %s",
+            len(reduction_plans),
+            [p["load"].name for p in reduction_plans],
+        )
 
         for plan in reduction_plans:
             load = plan["load"]
 
             # Execute the reduction
-            reduction_achieved = await self._async_reduce_single_load(
-                load, plan["needed_reduction"]
-            )
+            # Use .get() with fallback for safety (switch vs EV plan differences)
+            needed = plan.get("needed_reduction", plan.get("reduction_kw", 0.0))
+            reduction_achieved = await self._async_reduce_single_load(load, needed)
 
             if reduction_achieved > 0:
                 load.last_action_time = current_time
                 actions_taken.append(f"{load.name}: -{reduction_achieved:.2f}kW")
+            else:
+                failed_actions.append(load.name)
+                _LOGGER.warning(
+                    "Load %s was planned for reduction but achieved 0kW (already reduced, unavailable, or failed)",
+                    load.name,
+                )
 
         if actions_taken:
             self.last_action = "Reduced loads"
@@ -502,6 +606,12 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.last_action = "Cannot reduce further"
             self.last_action_reason = "No loads could be reduced"
             _LOGGER.warning(self.last_action_reason)
+        
+        if failed_actions:
+            _LOGGER.warning(
+                "Failed/skipped reductions: %s - these loads were planned but achieved 0kW",
+                failed_actions,
+            )
 
     async def _async_reduce_single_load(
         self, load: Load, needed_reduction: float
@@ -646,23 +756,49 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_reduce_switch_load(self, load: Load) -> float:
         """Reduce switch load (turn off normal, turn on inverted)."""
         if not load.switch_entity_id:
+            _LOGGER.warning(
+                "Load %s has no switch_entity_id configured, cannot reduce",
+                load.name,
+            )
             return 0.0
 
         state = self.hass.states.get(load.switch_entity_id)
         if not state:
+            _LOGGER.warning(
+                "Load %s: switch entity %s not found or unavailable",
+                load.name,
+                load.switch_entity_id,
+            )
             return 0.0
+
+        _LOGGER.debug(
+            "Load %s: switch_entity=%s, state=%s, inverted=%s",
+            load.name,
+            load.switch_entity_id,
+            state.state,
+            load.switch_inverted,
+        )
 
         # For inverted switches: power is consumed when OFF, so we turn ON to reduce
         # For normal switches: power is consumed when ON, so we turn OFF to reduce
         if load.switch_inverted:
             # Inverted: check if already ON (already reduced)
             if state.state == "on":
+                _LOGGER.debug(
+                    "Load %s: inverted switch already ON (reduced state), returning 0",
+                    load.name,
+                )
                 return 0.0
             target_state = "on"
             target_service = "turn_on"
         else:
             # Normal: check if already OFF (already reduced)
             if state.state != "on":
+                _LOGGER.debug(
+                    "Load %s: switch not ON (state=%s, already reduced), returning 0",
+                    load.name,
+                    state.state,
+                )
                 return 0.0
             target_state = "off"
             target_service = "turn_off"
