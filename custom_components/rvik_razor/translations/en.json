@@ -60,7 +60,8 @@
           "phases": "Number of phases",
           "voltage": "Voltage",
           "power_sensor": "Power sensor (optional)",
-          "assumed_power_kw": "Assumed power when at max (kW, optional)"
+          "assumed_power_kw": "Assumed power when at max (kW, optional)",
+          "timeout": "Regulation timeout (seconds between changes)"
         }
       },
       "add_switch_load": {
@@ -70,7 +71,8 @@
           "switch_entity": "Switch entity",
           "switch_inverted": "Inverted (consumes power when OFF)",
           "power_sensor": "Power sensor (optional)",
-          "assumed_power_kw": "Assumed power when on (kW, optional)"
+          "assumed_power_kw": "Assumed power when on (kW, optional)",
+          "timeout": "Regulation timeout (seconds between changes)"
         }
       },
       "remove_load": {

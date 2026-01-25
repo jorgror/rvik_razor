@@ -59,7 +59,8 @@
           "phases": "Number of phases",
           "voltage": "Voltage",
           "power_sensor": "Power sensor (optional, for accurate measurements)",
-          "assumed_power_kw": "Assumed max power (optional, overrides calculation)"
+          "assumed_power_kw": "Assumed max power (optional, overrides calculation)",
+          "timeout": "Regulation timeout (seconds between changes)"
         }
       },
       "add_switch_load": {
@@ -69,7 +70,8 @@
           "switch_entity": "Switch entity",
           "switch_inverted": "Inverted (consumes power when OFF)",
           "power_sensor": "Power sensor (optional, for accurate measurements)",
-          "assumed_power_kw": "Assumed power when on (optional, if no sensor)"
+          "assumed_power_kw": "Assumed power when on (optional, if no sensor)",
+          "timeout": "Regulation timeout (seconds between changes)"
         }
       },
       "edit_ev_load": {
@@ -84,7 +86,8 @@
           "phases": "Number of phases",
           "voltage": "Voltage",
           "power_sensor": "Power sensor (optional, for accurate measurements)",
-          "assumed_power_kw": "Assumed max power (optional, overrides calculation)"
+          "assumed_power_kw": "Assumed max power (optional, overrides calculation)",
+          "timeout": "Regulation timeout (seconds between changes)"
         }
       },
       "edit_switch_load": {
@@ -98,7 +101,8 @@
           "switch_entity": "Switch entity",
           "switch_inverted": "Inverted (consumes power when OFF)",
           "power_sensor": "Power sensor (optional, for accurate measurements)",
-          "assumed_power_kw": "Assumed power when on (optional, if no sensor)"
+          "assumed_power_kw": "Assumed power when on (optional, if no sensor)",
+          "timeout": "Regulation timeout (seconds between changes)"
         }
       },
       "edit_limits": {

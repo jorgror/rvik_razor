@@ -33,6 +33,9 @@ CONF_LOAD_VOLTAGE = "voltage"
 CONF_LOAD_SWITCH_ENTITY = "switch_entity"
 CONF_LOAD_SWITCH_INVERTED = "switch_inverted"
 
+# Regulation timing configuration
+CONF_LOAD_TIMEOUT = "timeout"
+
 # Default values
 DEFAULT_MAX_HOUR_KWH = 5.0
 DEFAULT_MODE = "monitor"
@@ -41,6 +44,9 @@ DEFAULT_COOLDOWN = 120  # seconds
 DEFAULT_RESTORE_MARGIN = 0.1  # kWh
 DEFAULT_PHASES = 3
 DEFAULT_VOLTAGE = 400
+# Load timeout configuration
+DEFAULT_LOAD_TIMEOUT = 120  # seconds between regulations for a load
+
 # Fallback ampere limits when entity doesn't provide them
 FALLBACK_MIN_AMPERE = 0
 FALLBACK_MAX_AMPERE = 16
@@ -89,12 +95,17 @@ class Load:
     switch_entity_id: str | None = None
     switch_inverted: bool = False  # If True, switch consumes power when OFF
 
+    # Regulation timing
+    timeout: int = DEFAULT_LOAD_TIMEOUT  # Seconds between regulations
+
     # Runtime state
     last_action_time: float = 0.0
     measured_power_per_ampere: float | None = (
         None  # Stored kW/A ratio from actual measurements
     )
-    current_switch_state: str | None = None  # Current state of switch ("on", "off", etc.)
+    current_switch_state: str | None = (
+        None  # Current state of switch ("on", "off", etc.)
+    )
     current_ampere: float | None = None  # Current ampere setting for EV chargers
 
     def to_dict(self) -> dict[str, Any]:
@@ -112,6 +123,7 @@ class Load:
             CONF_LOAD_VOLTAGE: self.voltage,
             CONF_LOAD_SWITCH_ENTITY: self.switch_entity_id,
             CONF_LOAD_SWITCH_INVERTED: self.switch_inverted,
+            CONF_LOAD_TIMEOUT: self.timeout,
         }
 
     @staticmethod
@@ -130,6 +142,7 @@ class Load:
             voltage=data.get(CONF_LOAD_VOLTAGE, DEFAULT_VOLTAGE),
             switch_entity_id=data.get(CONF_LOAD_SWITCH_ENTITY),
             switch_inverted=data.get(CONF_LOAD_SWITCH_INVERTED, False),
+            timeout=data.get(CONF_LOAD_TIMEOUT, DEFAULT_LOAD_TIMEOUT),
         )
 
 

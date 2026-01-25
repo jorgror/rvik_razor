@@ -97,7 +97,7 @@ def calculate_regulation_decision(
             [load for load in loads if load.enabled],
             key=lambda x: x.priority,
         )
-        
+
         # Log which loads are available for reduction
         _LOGGER.debug(
             "Loads available for reduction (enabled): %s",
@@ -121,12 +121,13 @@ def calculate_regulation_decision(
                 )
                 break
 
-            # Check cooldown
-            if current_time - load.last_action_time < cooldown:
+            # Check cooldown (use per-load timeout)
+            load_timeout = load.timeout
+            if current_time - load.last_action_time < load_timeout:
                 _LOGGER.debug(
                     "Load %s in cooldown, skipping (%.0fs remaining)",
                     load.name,
-                    cooldown - (current_time - load.last_action_time),
+                    load_timeout - (current_time - load.last_action_time),
                 )
                 continue
 
@@ -195,13 +196,14 @@ def calculate_regulation_decision(
             # This handles cases where higher priority loads are already at max
             eligible_loads = []
             for load in sorted_loads:
-                # Check cooldown
+                # Check cooldown (use per-load timeout)
+                load_timeout = load.timeout
                 time_since_action = current_time - load.last_action_time
-                if time_since_action < cooldown:
+                if time_since_action < load_timeout:
                     _LOGGER.debug(
                         "Load %s in cooldown for restore (%.0fs remaining)",
                         load.name,
-                        cooldown - time_since_action,
+                        load_timeout - time_since_action,
                     )
                     continue
                 eligible_loads.append(load)
@@ -259,9 +261,11 @@ def _calculate_ev_reduction(
     }
 
 
-def _calculate_switch_reduction(load: Load, needed_reduction: float) -> dict[str, Any] | None:
+def _calculate_switch_reduction(
+    load: Load, needed_reduction: float
+) -> dict[str, Any] | None:
     """Calculate switch reduction.
-    
+
     Returns None if the switch is already in the reduced state.
     If current_switch_state is None (unknown), assume it can be reduced.
     """
@@ -289,7 +293,7 @@ def _calculate_switch_reduction(load: Load, needed_reduction: float) -> dict[str
                 load.name,
             )
             return None
-    
+
     # For switches, we know the reduction from config
     reduction_kw = load.assumed_power_kw if load.assumed_power_kw else 0.0
     return {
@@ -346,7 +350,7 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         - enabled state from enabled_entity_id
         - current_switch_state for switch loads
         - current_ampere for EV loads
-        
+
         This ensures the pure regulation functions have current state information.
         """
         for load in self.loads:
@@ -372,11 +376,14 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         entity_enabled,
                     )
                     load.enabled = entity_enabled
-            
+
             # Update current switch state for switch loads
             if load.load_type == LoadType.SWITCH and load.switch_entity_id:
                 switch_state = self.hass.states.get(load.switch_entity_id)
-                if switch_state and switch_state.state not in ("unknown", "unavailable"):
+                if switch_state and switch_state.state not in (
+                    "unknown",
+                    "unavailable",
+                ):
                     load.current_switch_state = switch_state.state
                     _LOGGER.debug(
                         "Load %s: switch state is %s (inverted=%s)",
@@ -391,11 +398,14 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         load.name,
                         load.switch_entity_id,
                     )
-            
+
             # Update current ampere for EV loads
             if load.load_type == LoadType.EV_AMPERE and load.ampere_number_entity_id:
                 ampere_state = self.hass.states.get(load.ampere_number_entity_id)
-                if ampere_state and ampere_state.state not in ("unknown", "unavailable"):
+                if ampere_state and ampere_state.state not in (
+                    "unknown",
+                    "unavailable",
+                ):
                     try:
                         load.current_ampere = float(ampere_state.state)
                     except (ValueError, TypeError):
@@ -606,7 +616,7 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.last_action = "Cannot reduce further"
             self.last_action_reason = "No loads could be reduced"
             _LOGGER.warning(self.last_action_reason)
-        
+
         if failed_actions:
             _LOGGER.warning(
                 "Failed/skipped reductions: %s - these loads were planned but achieved 0kW",

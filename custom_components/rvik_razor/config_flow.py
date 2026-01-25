@@ -24,11 +24,13 @@ from .const import (
     CONF_LOAD_PRIORITY,
     CONF_LOAD_SWITCH_ENTITY,
     CONF_LOAD_SWITCH_INVERTED,
+    CONF_LOAD_TIMEOUT,
     CONF_LOAD_TYPE,
     CONF_LOAD_VOLTAGE,
     CONF_LOADS,
     CONF_MAX_HOUR_KWH,
     CONF_MODE,
+    DEFAULT_LOAD_TIMEOUT,
     DEFAULT_MAX_HOUR_KWH,
     DEFAULT_MODE,
     DEFAULT_PHASES,
@@ -394,6 +396,17 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
                         mode=selector.NumberSelectorMode.BOX,
                     )
                 ),
+                vol.Optional(
+                    CONF_LOAD_TIMEOUT, default=DEFAULT_LOAD_TIMEOUT
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0,
+                        max=3600,
+                        step=1,
+                        unit_of_measurement="seconds",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
             }
         )
 
@@ -449,6 +462,17 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
                         mode=selector.NumberSelectorMode.BOX,
                     )
                 ),
+                vol.Optional(
+                    CONF_LOAD_TIMEOUT, default=DEFAULT_LOAD_TIMEOUT
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0,
+                        max=3600,
+                        step=1,
+                        unit_of_measurement="seconds",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
             }
         )
 
@@ -498,6 +522,7 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
         current_priority = self.current_load.get(CONF_LOAD_PRIORITY, 1)
         current_enabled = self.current_load.get(CONF_LOAD_ENABLED, True)
         current_enabled_entity = self.current_load.get(CONF_LOAD_ENABLED_ENTITY) or None
+        current_timeout = self.current_load.get(CONF_LOAD_TIMEOUT, DEFAULT_LOAD_TIMEOUT)
 
         # Build schema dynamically to handle None values properly
         schema_dict: dict[Any, Any] = {
@@ -607,6 +632,19 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
                 )
             )
 
+        # Add timeout field
+        schema_dict[vol.Optional(CONF_LOAD_TIMEOUT, default=current_timeout)] = (
+            selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0,
+                    max=3600,
+                    step=1,
+                    unit_of_measurement="seconds",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            )
+        )
+
         data_schema = vol.Schema(schema_dict)
 
         return self.async_show_form(
@@ -648,6 +686,7 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
         current_priority = self.current_load.get(CONF_LOAD_PRIORITY, 1)
         current_enabled = self.current_load.get(CONF_LOAD_ENABLED, True)
         current_enabled_entity = self.current_load.get(CONF_LOAD_ENABLED_ENTITY) or None
+        current_timeout = self.current_load.get(CONF_LOAD_TIMEOUT, DEFAULT_LOAD_TIMEOUT)
 
         # Build schema dynamically to handle None values properly
         schema_dict: dict[Any, Any] = {
@@ -736,6 +775,19 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
                     )
                 )
             )
+
+        # Add timeout field
+        schema_dict[vol.Optional(CONF_LOAD_TIMEOUT, default=current_timeout)] = (
+            selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0,
+                    max=3600,
+                    step=1,
+                    unit_of_measurement="seconds",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            )
+        )
 
         data_schema = vol.Schema(schema_dict)
 
