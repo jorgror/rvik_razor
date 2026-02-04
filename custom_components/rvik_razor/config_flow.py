@@ -12,6 +12,7 @@ from homeassistant.core import callback
 from homeassistant.helpers import selector
 
 from .const import (
+    CONF_BASE_TARGET_FRACTION,
     CONF_HOUR_ENERGY_SENSOR,
     CONF_HOUSE_POWER_SENSOR,
     CONF_LOAD_AMPERE_ENTITY,
@@ -30,10 +31,13 @@ from .const import (
     CONF_LOADS,
     CONF_MAX_HOUR_KWH,
     CONF_MODE,
+    CONF_RAMP_START_MINUTES,
+    DEFAULT_BASE_TARGET_FRACTION,
     DEFAULT_LOAD_TIMEOUT,
     DEFAULT_MAX_HOUR_KWH,
     DEFAULT_MODE,
     DEFAULT_PHASES,
+    DEFAULT_RAMP_START_MINUTES,
     DEFAULT_VOLTAGE,
     DOMAIN,
     LoadType,
@@ -813,6 +817,12 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
             CONF_MAX_HOUR_KWH, DEFAULT_MAX_HOUR_KWH
         )
         current_mode = self._config_entry.data.get(CONF_MODE, DEFAULT_MODE)
+        current_base_fraction = self._config_entry.data.get(
+            CONF_BASE_TARGET_FRACTION, DEFAULT_BASE_TARGET_FRACTION
+        )
+        current_ramp_minutes = self._config_entry.data.get(
+            CONF_RAMP_START_MINUTES, DEFAULT_RAMP_START_MINUTES
+        )
 
         data_schema = vol.Schema(
             {
@@ -831,6 +841,27 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
                     selector.SelectSelectorConfig(
                         options=[mode.value for mode in OperationMode],
                         mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    CONF_BASE_TARGET_FRACTION, default=current_base_fraction
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.5,
+                        max=1.0,
+                        step=0.05,
+                        mode=selector.NumberSelectorMode.SLIDER,
+                    )
+                ),
+                vol.Required(
+                    CONF_RAMP_START_MINUTES, default=current_ramp_minutes
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.0,
+                        max=30.0,
+                        step=1.0,
+                        unit_of_measurement="min",
+                        mode=selector.NumberSelectorMode.BOX,
                     )
                 ),
             }

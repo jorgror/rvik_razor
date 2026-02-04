@@ -14,6 +14,8 @@ CONF_HOUSE_POWER_SENSOR = "house_power_sensor"
 CONF_MAX_HOUR_KWH = "max_hour_kwh"
 CONF_MODE = "mode"
 CONF_LOADS = "loads"
+CONF_BASE_TARGET_FRACTION = "base_target_fraction"
+CONF_RAMP_START_MINUTES = "ramp_start_minutes"
 
 # Load configuration keys
 CONF_LOAD_NAME = "name"
@@ -46,6 +48,9 @@ DEFAULT_PHASES = 3
 DEFAULT_VOLTAGE = 400
 # Load timeout configuration
 DEFAULT_LOAD_TIMEOUT = 120  # seconds between regulations for a load
+# Conservative target strategy defaults
+DEFAULT_BASE_TARGET_FRACTION = 0.75  # Target 75% of max early in the hour
+DEFAULT_RAMP_START_MINUTES = 15.0  # Start ramping up with 15 minutes remaining
 
 # Fallback ampere limits when entity doesn't provide them
 FALLBACK_MIN_AMPERE = 0
@@ -107,6 +112,7 @@ class Load:
         None  # Current state of switch ("on", "off", etc.)
     )
     current_ampere: float | None = None  # Current ampere setting for EV chargers
+    current_power_kw: float | None = None  # Measured power from power_sensor_entity_id
 
     def to_dict(self) -> dict[str, Any]:
         """Convert load to dictionary for storage."""

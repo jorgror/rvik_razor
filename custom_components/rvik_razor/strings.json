@@ -107,10 +107,12 @@
       },
       "edit_limits": {
         "title": "Edit limits",
-        "description": "Update the maximum hourly energy limit and operation mode.",
+        "description": "Update the maximum hourly energy limit, operation mode, and conservative target strategy settings.\n\nThe conservative target strategy keeps consumption below the limit early in the hour, then ramps up toward 100% in the final minutes to reduce the risk of overshooting.",
         "data": {
           "max_hour_kwh": "Maximum kWh per hour",
-          "mode": "Operation mode"
+          "mode": "Operation mode",
+          "base_target_fraction": "Early hour target fraction (e.g., 0.75 = 75%)",
+          "ramp_start_minutes": "Ramp-up start (minutes before end of hour)"
         }
       }
     }

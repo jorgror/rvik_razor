@@ -64,6 +64,23 @@ SENSORS: tuple[RvikRazorSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda data: data.get("needed_reduction_kw"),
     ),
+    RvikRazorSensorEntityDescription(
+        key="effective_target_kwh",
+        name="Effective target",
+        icon="mdi:target",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: data.get("effective_target_kwh"),
+        attributes_fn=lambda data: {
+            "max_hour_kwh": data.get("max_hour_kwh"),
+            "target_fraction": (
+                f"{data.get('target_fraction', 0) * 100:.0f}%"
+                if data.get("target_fraction") is not None
+                else None
+            ),
+            "available_down_capacity_kw": data.get("available_down_capacity_kw"),
+        },
+    ),
 )
 
 

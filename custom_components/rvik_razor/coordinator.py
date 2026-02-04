@@ -11,12 +11,16 @@ from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
+    CONF_BASE_TARGET_FRACTION,
     CONF_HOUSE_POWER_SENSOR,
     CONF_HOUR_ENERGY_SENSOR,
     CONF_LOADS,
     CONF_MAX_HOUR_KWH,
     CONF_MODE,
+    CONF_RAMP_START_MINUTES,
+    DEFAULT_BASE_TARGET_FRACTION,
     DEFAULT_COOLDOWN,
+    DEFAULT_RAMP_START_MINUTES,
     DEFAULT_RESTORE_MARGIN,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
@@ -28,6 +32,140 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def calculate_available_down_capacity(loads: list[Load]) -> float:
+    """Calculate total available downward control capacity.
+
+    This determines how much power we could reduce if needed, based on
+    currently active/consuming loads.
+
+    Uses measured power from power_sensor_entity_id when available,
+    falling back to assumed_power_kw or calculated power for EV chargers.
+
+    Args:
+        loads: List of Load objects with current state
+
+    Returns:
+        Total potential reduction capacity in kW
+    """
+    total_capacity = 0.0
+
+    for load in loads:
+        if not load.enabled:
+            continue
+
+        if load.load_type == LoadType.SWITCH:
+            # For switches, check if it's in a state that can be reduced
+            is_consuming = False
+            if load.switch_inverted:
+                # Inverted: OFF = consuming, ON = reduced
+                is_consuming = load.current_switch_state == "off"
+            else:
+                # Normal: ON = consuming, OFF = reduced
+                is_consuming = load.current_switch_state == "on"
+
+            if is_consuming:
+                # Prefer measured power, fall back to assumed power
+                if load.current_power_kw is not None and load.current_power_kw > 0:
+                    total_capacity += load.current_power_kw
+                    _LOGGER.debug(
+                        "Load %s: using measured power %.3f kW for capacity",
+                        load.name,
+                        load.current_power_kw,
+                    )
+                else:
+                    total_capacity += load.assumed_power_kw or 0.0
+
+        elif load.load_type == LoadType.EV_AMPERE:
+            # For EV chargers, prefer measured power if available
+            if load.current_power_kw is not None and load.current_power_kw > 0:
+                total_capacity += load.current_power_kw
+                _LOGGER.debug(
+                    "Load %s: using measured power %.3f kW for capacity",
+                    load.name,
+                    load.current_power_kw,
+                )
+            elif load.current_ampere is not None and load.current_ampere > 0:
+                # Calculate from current amperage
+                if load.measured_power_per_ampere is not None:
+                    total_capacity += (
+                        load.current_ampere * load.measured_power_per_ampere
+                    )
+                else:
+                    # Calculate from configured phases and voltage
+                    if load.phases == 3:
+                        power_per_ampere = (load.voltage * 1.732) / 1000.0
+                    else:
+                        power_per_ampere = load.voltage / 1000.0
+                    total_capacity += load.current_ampere * power_per_ampere
+
+    return total_capacity
+
+
+def calculate_effective_target(
+    max_hour_kwh: float,
+    remaining_minutes: float,
+    available_down_capacity_kw: float | None = None,
+    current_power_kw: float | None = None,
+    base_fraction: float = DEFAULT_BASE_TARGET_FRACTION,
+    ramp_start_minutes: float = DEFAULT_RAMP_START_MINUTES,
+) -> tuple[float, float]:
+    """Calculate effective target with conservative early-hour buffer and late ramp-up.
+
+    This strategy keeps consumption lower than the end-of-hour goal early on,
+    then linearly ramps up to 100% in the final minutes. This reduces the risk
+    of overspending when uncontrollable loads spike late in the hour.
+
+    Args:
+        max_hour_kwh: Maximum allowed energy for the hour
+        remaining_minutes: Minutes left in the hour
+        available_down_capacity_kw: How much load can still be reduced (optional)
+        current_power_kw: Current instant power (for dynamic adjustment)
+        base_fraction: Fraction of max to target early in hour (e.g., 0.75 = 75%)
+        ramp_start_minutes: When to start ramping to 100% (minutes before end)
+
+    Returns:
+        Tuple of (effective_target_kwh, current_target_fraction)
+    """
+    effective_fraction = base_fraction
+
+    # Dynamic buffer: if we have little downward control, be more conservative
+    if (
+        current_power_kw is not None
+        and available_down_capacity_kw is not None
+        and current_power_kw > 0
+    ):
+        down_capacity_ratio = available_down_capacity_kw / current_power_kw
+        if down_capacity_ratio < 0.2:
+            # Very low control capacity - be extra conservative
+            effective_fraction = min(base_fraction, 0.70)
+            _LOGGER.debug(
+                "Low down capacity (%.1f%% of current power), using conservative fraction %.2f",
+                down_capacity_ratio * 100,
+                effective_fraction,
+            )
+
+    if remaining_minutes <= ramp_start_minutes:
+        # In ramp period: linearly increase from base_fraction to 1.0
+        ramp_progress = 1.0 - (remaining_minutes / ramp_start_minutes)
+        fraction = effective_fraction + (1.0 - effective_fraction) * ramp_progress
+        _LOGGER.debug(
+            "Ramp period: %.1f min remaining, progress=%.2f, fraction=%.2f",
+            remaining_minutes,
+            ramp_progress,
+            fraction,
+        )
+    else:
+        # Early hour: use conservative fraction
+        fraction = effective_fraction
+        _LOGGER.debug(
+            "Early hour: %.1f min remaining, using base fraction=%.2f",
+            remaining_minutes,
+            fraction,
+        )
+
+    return max_hour_kwh * fraction, fraction
 
 
 def calculate_regulation_decision(
@@ -295,29 +433,35 @@ def _calculate_load_reduction_potential(load: Load) -> float:
     This determines how much power reduction a load COULD provide if reduced,
     based on its current state.
 
+    Uses measured power (current_power_kw) when available, falling back to
+    assumed_power_kw or calculated power for EV chargers.
+
     Returns the potential reduction in kW, or 0 if already fully reduced.
     """
     if load.load_type == LoadType.SWITCH:
         # For switches, check if it's in a state that can be reduced
+        is_consuming = False
         if load.switch_inverted:
             # Inverted: OFF = consuming, ON = reduced
-            # Can reduce if currently OFF
-            if load.current_switch_state == "off":
-                return load.assumed_power_kw or 0.0
-            else:
-                # Already ON (reduced) or unknown
-                return 0.0
+            is_consuming = load.current_switch_state == "off"
         else:
             # Normal: ON = consuming, OFF = reduced
-            # Can reduce if currently ON
-            if load.current_switch_state == "on":
-                return load.assumed_power_kw or 0.0
-            else:
-                # Already OFF (reduced) or unknown
-                return 0.0
+            is_consuming = load.current_switch_state == "on"
+
+        if is_consuming:
+            # Prefer measured power, fall back to assumed
+            if load.current_power_kw is not None and load.current_power_kw > 0:
+                return load.current_power_kw
+            return load.assumed_power_kw or 0.0
+        else:
+            # Already reduced or unknown
+            return 0.0
+
     elif load.load_type == LoadType.EV_AMPERE:
-        # For EV chargers, check current amperage
-        if load.current_ampere is not None and load.current_ampere > 0:
+        # For EV chargers, prefer measured power
+        if load.current_power_kw is not None and load.current_power_kw > 0:
+            return load.current_power_kw
+        elif load.current_ampere is not None and load.current_ampere > 0:
             # Calculate potential reduction from current amperage
             # Use stored power ratio or calculate from config
             if load.measured_power_per_ampere is not None:
@@ -398,8 +542,11 @@ def _calculate_switch_reduction(
             )
             return None
 
-    # For switches, we know the reduction from config
-    reduction_kw = load.assumed_power_kw if load.assumed_power_kw else 0.0
+    # For switches, prefer measured power, fall back to assumed
+    if load.current_power_kw is not None and load.current_power_kw > 0:
+        reduction_kw = load.current_power_kw
+    else:
+        reduction_kw = load.assumed_power_kw if load.assumed_power_kw else 0.0
     return {
         "load": load,
         "type": "switch",
@@ -517,6 +664,32 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 else:
                     load.current_ampere = None
 
+            # Update current measured power from power sensor if configured
+            if load.power_sensor_entity_id:
+                power_state = self.hass.states.get(load.power_sensor_entity_id)
+                if power_state and power_state.state not in (
+                    "unknown",
+                    "unavailable",
+                ):
+                    try:
+                        power_value = float(power_state.state)
+                        # Convert W to kW if needed
+                        if power_state.attributes.get("unit_of_measurement") == "W":
+                            load.current_power_kw = power_value / 1000.0
+                        else:
+                            load.current_power_kw = power_value
+                        _LOGGER.debug(
+                            "Load %s: measured power = %.3f kW",
+                            load.name,
+                            load.current_power_kw,
+                        )
+                    except (ValueError, TypeError):
+                        load.current_power_kw = None
+                else:
+                    load.current_power_kw = None
+            else:
+                load.current_power_kw = None
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from sensors and calculate needed actions."""
         try:
@@ -577,22 +750,57 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             max_hour_kwh = self.config.get(CONF_MAX_HOUR_KWH, 5.0)
             mode = OperationMode(self.config.get(CONF_MODE, OperationMode.MONITOR))
 
-            # Calculate needed reduction
+            # Update runtime state to get current load states for capacity calculation
+            self._update_loads_runtime_state()
+
+            # Calculate available downward control capacity
+            remaining_minutes = (
+                remaining_seconds / 60.0 if remaining_seconds > 0 else 0.0
+            )
+            available_down_capacity_kw = calculate_available_down_capacity(self.loads)
+
+            # Get conservative target strategy settings from config
+            base_target_fraction = self.config.get(
+                CONF_BASE_TARGET_FRACTION, DEFAULT_BASE_TARGET_FRACTION
+            )
+            ramp_start_minutes = self.config.get(
+                CONF_RAMP_START_MINUTES, DEFAULT_RAMP_START_MINUTES
+            )
+
+            # Calculate effective target with conservative strategy
+            effective_target_kwh, target_fraction = calculate_effective_target(
+                max_hour_kwh=max_hour_kwh,
+                remaining_minutes=remaining_minutes,
+                available_down_capacity_kw=available_down_capacity_kw,
+                current_power_kw=house_power_kw,
+                base_fraction=base_target_fraction,
+                ramp_start_minutes=ramp_start_minutes,
+            )
+
+            _LOGGER.debug(
+                "Target strategy: max=%.2fkWh, effective=%.2fkWh (%.0f%%), down_capacity=%.2fkW",
+                max_hour_kwh,
+                effective_target_kwh,
+                target_fraction * 100,
+                available_down_capacity_kw,
+            )
+
+            # Calculate needed reduction against effective target (not absolute max)
             if remaining_seconds > 0:
                 needed_reduction_kw = max(
-                    0.0, (projected_end_kwh - max_hour_kwh) * 3600.0 / remaining_seconds
+                    0.0,
+                    (projected_end_kwh - effective_target_kwh)
+                    * 3600.0
+                    / remaining_seconds,
                 )
             else:
                 needed_reduction_kw = 0.0
 
             # Execute control actions if in control mode
             if mode == OperationMode.CONTROL:
-                remaining_minutes = (
-                    remaining_seconds / 60.0 if remaining_seconds else 0.0
-                )
                 await self._async_execute_control(
                     needed_reduction_kw,
-                    max_hour_kwh,
+                    effective_target_kwh,  # Use effective target for restoration logic
                     projected_end_kwh,
                     house_power_kw,
                     remaining_minutes,
@@ -608,6 +816,9 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "house_power_kw": house_power_kw,
                 "remaining_seconds": remaining_seconds,
                 "max_hour_kwh": max_hour_kwh,
+                "effective_target_kwh": effective_target_kwh,
+                "target_fraction": target_fraction,
+                "available_down_capacity_kw": available_down_capacity_kw,
                 "mode": mode,
                 "last_action": self.last_action,
                 "last_action_reason": self.last_action_reason,
@@ -621,24 +832,30 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_execute_control(
         self,
         needed_reduction_kw: float,
-        max_hour_kwh: float,
+        effective_target_kwh: float,
         projected_end_kwh: float,
         current_power_kw: float | None = None,
         remaining_minutes: float | None = None,
     ) -> None:
-        """Execute control actions based on needed reduction."""
-        current_time = time.time()
+        """Execute control actions based on needed reduction.
 
-        # Update runtime state for each load (enabled state, switch state, ampere values)
-        self._update_loads_runtime_state()
+        Args:
+            needed_reduction_kw: How much power needs to be reduced now
+            effective_target_kwh: The current effective target (accounting for
+                conservative early-hour strategy and ramp-up)
+            projected_end_kwh: Projected energy usage at end of hour
+            current_power_kw: Current instant power consumption
+            remaining_minutes: Minutes remaining in the current hour
+        """
+        current_time = time.time()
 
         # Log current state before decision
         _LOGGER.debug(
-            "Control state: projected=%.2fkWh, max=%.2fkWh, margin=%.2fkWh, "
+            "Control state: projected=%.2fkWh, target=%.2fkWh, margin=%.2fkWh, "
             "needed_reduction=%.2fkW, current_power=%.2fkW, remaining_mins=%.1f",
             projected_end_kwh,
-            max_hour_kwh,
-            max_hour_kwh - projected_end_kwh,
+            effective_target_kwh,
+            effective_target_kwh - projected_end_kwh,
             needed_reduction_kw,
             current_power_kw if current_power_kw else 0.0,
             remaining_minutes if remaining_minutes else 0.0,
@@ -649,7 +866,7 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             loads=self.loads,
             needed_reduction_kw=needed_reduction_kw,
             projected_end_kwh=projected_end_kwh,
-            max_hour_kwh=max_hour_kwh,
+            max_hour_kwh=effective_target_kwh,  # Use effective target for decision logic
             current_time=current_time,
             current_power_kw=current_power_kw,
             remaining_minutes=remaining_minutes,
@@ -677,7 +894,7 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self._async_execute_restorations(
                 decision["loads_to_restore"],
                 current_time,
-                max_hour_kwh,
+                effective_target_kwh,  # Use effective target for restoration margin check
                 projected_end_kwh,
             )
 

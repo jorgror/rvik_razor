@@ -12,7 +12,11 @@ from typing import Any
 import pytest
 
 from custom_components.rvik_razor.const import Load, LoadType
-from custom_components.rvik_razor.coordinator import calculate_regulation_decision
+from custom_components.rvik_razor.coordinator import (
+    calculate_available_down_capacity,
+    calculate_effective_target,
+    calculate_regulation_decision,
+)
 
 
 def create_test_load(
@@ -36,6 +40,291 @@ def create_test_load(
         assumed_power_kw=assumed_power_kw,
         **kwargs,
     )
+
+
+class TestConservativeTargetStrategy:
+    """Test the conservative target strategy with linear ramp-up."""
+
+    def test_early_hour_uses_base_fraction(self):
+        """Test that early in the hour we use the conservative base fraction."""
+        max_kwh = 5.0
+        remaining_minutes = 45.0  # Early in the hour
+
+        effective_target, fraction = calculate_effective_target(
+            max_hour_kwh=max_kwh,
+            remaining_minutes=remaining_minutes,
+            base_fraction=0.75,
+            ramp_start_minutes=15.0,
+        )
+
+        assert fraction == 0.75
+        assert effective_target == 3.75  # 5.0 * 0.75
+
+    def test_ramp_start_begins_increasing(self):
+        """Test that at ramp start we begin increasing toward 100%."""
+        max_kwh = 5.0
+        remaining_minutes = 15.0  # Exactly at ramp start
+
+        effective_target, fraction = calculate_effective_target(
+            max_hour_kwh=max_kwh,
+            remaining_minutes=remaining_minutes,
+            base_fraction=0.75,
+            ramp_start_minutes=15.0,
+        )
+
+        # At ramp start (progress=0), should still be at base fraction
+        assert fraction == 0.75
+        assert effective_target == 3.75
+
+    def test_halfway_through_ramp(self):
+        """Test target halfway through the ramp period."""
+        max_kwh = 5.0
+        remaining_minutes = 7.5  # Halfway through 15-minute ramp
+
+        effective_target, fraction = calculate_effective_target(
+            max_hour_kwh=max_kwh,
+            remaining_minutes=remaining_minutes,
+            base_fraction=0.75,
+            ramp_start_minutes=15.0,
+        )
+
+        # Halfway: fraction = 0.75 + (1.0 - 0.75) * 0.5 = 0.875
+        assert fraction == pytest.approx(0.875, rel=0.01)
+        assert effective_target == pytest.approx(4.375, rel=0.01)
+
+    def test_end_of_hour_reaches_100_percent(self):
+        """Test that at end of hour we reach 100% of max."""
+        max_kwh = 5.0
+        remaining_minutes = 0.0  # End of hour
+
+        effective_target, fraction = calculate_effective_target(
+            max_hour_kwh=max_kwh,
+            remaining_minutes=remaining_minutes,
+            base_fraction=0.75,
+            ramp_start_minutes=15.0,
+        )
+
+        assert fraction == 1.0
+        assert effective_target == 5.0
+
+    def test_low_down_capacity_more_conservative(self):
+        """Test that low downward control capacity triggers more conservative target."""
+        max_kwh = 5.0
+        remaining_minutes = 30.0  # Early hour
+
+        # Low down capacity relative to current power
+        effective_target, fraction = calculate_effective_target(
+            max_hour_kwh=max_kwh,
+            remaining_minutes=remaining_minutes,
+            available_down_capacity_kw=0.5,  # Only 10% of current power
+            current_power_kw=5.0,
+            base_fraction=0.75,
+            ramp_start_minutes=15.0,
+        )
+
+        # Should use more conservative 0.70 fraction
+        assert fraction == 0.70
+        assert effective_target == 3.5
+
+    def test_adequate_down_capacity_normal_target(self):
+        """Test that adequate down capacity uses normal target."""
+        max_kwh = 5.0
+        remaining_minutes = 30.0  # Early hour
+
+        # Adequate down capacity (30% of current power)
+        effective_target, fraction = calculate_effective_target(
+            max_hour_kwh=max_kwh,
+            remaining_minutes=remaining_minutes,
+            available_down_capacity_kw=1.5,  # 30% of current power
+            current_power_kw=5.0,
+            base_fraction=0.75,
+            ramp_start_minutes=15.0,
+        )
+
+        # Should use normal 0.75 fraction
+        assert fraction == 0.75
+        assert effective_target == 3.75
+
+
+class TestAvailableDownCapacity:
+    """Test calculation of available downward control capacity."""
+
+    def test_switch_on_provides_capacity(self):
+        """Test that an enabled switch that is ON provides capacity."""
+        loads = [
+            create_test_load(
+                name="Heater",
+                load_type=LoadType.SWITCH,
+                enabled=True,
+                assumed_power_kw=2.0,
+                current_switch_state="on",
+            )
+        ]
+
+        capacity = calculate_available_down_capacity(loads)
+        assert capacity == 2.0
+
+    def test_switch_off_no_capacity(self):
+        """Test that an enabled switch that is OFF provides no capacity."""
+        loads = [
+            create_test_load(
+                name="Heater",
+                load_type=LoadType.SWITCH,
+                enabled=True,
+                assumed_power_kw=2.0,
+                current_switch_state="off",
+            )
+        ]
+
+        capacity = calculate_available_down_capacity(loads)
+        assert capacity == 0.0
+
+    def test_inverted_switch_off_provides_capacity(self):
+        """Test that an inverted switch that is OFF (consuming) provides capacity."""
+        loads = [
+            create_test_load(
+                name="Inverted Load",
+                load_type=LoadType.SWITCH,
+                enabled=True,
+                assumed_power_kw=1.5,
+                current_switch_state="off",
+                switch_inverted=True,
+            )
+        ]
+
+        capacity = calculate_available_down_capacity(loads)
+        assert capacity == 1.5
+
+    def test_disabled_load_no_capacity(self):
+        """Test that disabled loads don't count toward capacity."""
+        loads = [
+            create_test_load(
+                name="Disabled Heater",
+                load_type=LoadType.SWITCH,
+                enabled=False,
+                assumed_power_kw=2.0,
+                current_switch_state="on",
+            )
+        ]
+
+        capacity = calculate_available_down_capacity(loads)
+        assert capacity == 0.0
+
+    def test_ev_charger_provides_capacity(self):
+        """Test that an EV charger with current amperage provides capacity."""
+        loads = [
+            create_test_load(
+                name="EV Charger",
+                load_type=LoadType.EV_AMPERE,
+                enabled=True,
+                current_ampere=16.0,
+                phases=3,
+                voltage=400,
+            )
+        ]
+
+        capacity = calculate_available_down_capacity(loads)
+        # 3-phase: power_per_ampere = 400 * 1.732 / 1000 ≈ 0.693 kW/A
+        # 16A * 0.693 ≈ 11.08 kW
+        assert capacity == pytest.approx(11.08, rel=0.02)
+
+    def test_multiple_loads_sum_capacity(self):
+        """Test that multiple loads sum their capacities."""
+        loads = [
+            create_test_load(
+                name="Heater 1",
+                load_type=LoadType.SWITCH,
+                enabled=True,
+                assumed_power_kw=2.0,
+                current_switch_state="on",
+            ),
+            create_test_load(
+                name="Heater 2",
+                load_type=LoadType.SWITCH,
+                enabled=True,
+                assumed_power_kw=1.5,
+                current_switch_state="on",
+            ),
+        ]
+
+        capacity = calculate_available_down_capacity(loads)
+        assert capacity == 3.5
+
+    def test_measured_power_preferred_over_assumed(self):
+        """Test that measured power is used when available instead of assumed."""
+        loads = [
+            create_test_load(
+                name="Heater with sensor",
+                load_type=LoadType.SWITCH,
+                enabled=True,
+                assumed_power_kw=2.0,  # Assumed value
+                current_switch_state="on",
+                current_power_kw=1.8,  # Actual measured value
+            )
+        ]
+
+        capacity = calculate_available_down_capacity(loads)
+        # Should use measured 1.8 kW, not assumed 2.0 kW
+        assert capacity == 1.8
+
+    def test_falls_back_to_assumed_when_no_measurement(self):
+        """Test that assumed power is used when no measurement available."""
+        loads = [
+            create_test_load(
+                name="Heater without sensor",
+                load_type=LoadType.SWITCH,
+                enabled=True,
+                assumed_power_kw=2.0,
+                current_switch_state="on",
+                current_power_kw=None,  # No measurement
+            )
+        ]
+
+        capacity = calculate_available_down_capacity(loads)
+        assert capacity == 2.0
+
+    def test_ev_charger_measured_power_preferred(self):
+        """Test that EV charger uses measured power when available."""
+        loads = [
+            create_test_load(
+                name="EV Charger",
+                load_type=LoadType.EV_AMPERE,
+                enabled=True,
+                current_ampere=16.0,
+                phases=3,
+                voltage=400,
+                current_power_kw=10.5,  # Actual measured value
+            )
+        ]
+
+        capacity = calculate_available_down_capacity(loads)
+        # Should use measured 10.5 kW, not calculated from amperage
+        assert capacity == 10.5
+
+    def test_mixed_measured_and_assumed_loads(self):
+        """Test capacity calculation with mix of measured and assumed loads."""
+        loads = [
+            create_test_load(
+                name="Heater with sensor",
+                load_type=LoadType.SWITCH,
+                enabled=True,
+                assumed_power_kw=2.0,
+                current_switch_state="on",
+                current_power_kw=1.7,  # Measured
+            ),
+            create_test_load(
+                name="Heater without sensor",
+                load_type=LoadType.SWITCH,
+                enabled=True,
+                assumed_power_kw=1.5,
+                current_switch_state="on",
+                current_power_kw=None,  # No measurement
+            ),
+        ]
+
+        capacity = calculate_available_down_capacity(loads)
+        # 1.7 (measured) + 1.5 (assumed) = 3.2
+        assert capacity == 3.2
 
 
 class TestRegulationDecisions:
