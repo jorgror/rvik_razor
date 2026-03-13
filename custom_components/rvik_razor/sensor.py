@@ -127,7 +127,8 @@ class RvikRazorSensor(CoordinatorEntity[RvikRazorCoordinator], SensorEntity):
         """Return the state of the sensor."""
         if self.coordinator.data is None:
             return None
-        return self.entity_description.value_fn(self.coordinator.data)
+        value = self.entity_description.value_fn(self.coordinator.data)
+        return round(value, 2) if value is not None else None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
