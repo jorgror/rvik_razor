@@ -1,8 +1,16 @@
-# RVik Razor - Energy Limiter for Home Assistant
+# RVik Razor — Energy Limiter for Home Assistant
 
-RVik Razor is a custom Home Assistant integration that automatically controls your EV charger and other loads to keep your hourly energy consumption below a specified limit.
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
+[![GitHub Release](https://img.shields.io/github/release/jorgror/rvik_razor.svg)](https://github.com/jorgror/rvik_razor/releases)
+[![License](https://img.shields.io/github/license/jorgror/rvik_razor.svg)](LICENSE)
 
-## MVP Features Implemented
+RVik Razor automatically controls your EV charger and other loads to keep your **hourly energy consumption below a configurable limit** — protecting you from grid tariff peaks.
+
+> **Works great with Zaptec, Easee, and any EV charger exposed as a `number` entity (ampere control), as well as any `switch`-based load (e.g. heat pump, water heater).**
+
+---
+
+## Features
 
 ### Core Functionality
 - **Hourly Energy Monitoring**: Tracks current hour energy consumption from a sensor

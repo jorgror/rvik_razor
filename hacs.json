@@ -1,4 +1,5 @@
 {
   "name": "RVik Razor",
-  "render_readme": true
+  "render_readme": true,
+  "homeassistant": "2024.1.0"
 }
