@@ -111,10 +111,10 @@ def calculate_effective_target(
     base_fraction: float = DEFAULT_BASE_TARGET_FRACTION,
     ramp_start_minutes: float = DEFAULT_RAMP_START_MINUTES,
 ) -> tuple[float, float]:
-    """Calculate effective target with conservative early-hour buffer and late ramp-up.
+    """Calculate effective target with conservative early-hour buffer and late jump.
 
     This strategy keeps consumption lower than the end-of-hour goal early on,
-    then linearly ramps up to 100% in the final minutes. This reduces the risk
+    then jumps to 100% in the final minutes window. This reduces the risk
     of overspending when uncontrollable loads spike late in the hour.
 
     Args:
@@ -123,7 +123,7 @@ def calculate_effective_target(
         available_down_capacity_kw: How much load can still be reduced (optional)
         current_power_kw: Current instant power (for dynamic adjustment)
         base_fraction: Fraction of max to target early in hour (e.g., 0.75 = 75%)
-        ramp_start_minutes: When to start ramping to 100% (minutes before end)
+        ramp_start_minutes: Final minutes window before jumping to 100%
 
     Returns:
         Tuple of (effective_target_kwh, current_target_fraction)
@@ -147,14 +147,11 @@ def calculate_effective_target(
             )
 
     if remaining_minutes <= ramp_start_minutes:
-        # In ramp period: linearly increase from base_fraction to 1.0
-        ramp_progress = 1.0 - (remaining_minutes / ramp_start_minutes)
-        fraction = effective_fraction + (1.0 - effective_fraction) * ramp_progress
+        # Final window: jump directly to full target
+        fraction = 1.0
         _LOGGER.debug(
-            "Ramp period: %.1f min remaining, progress=%.2f, fraction=%.2f",
+            "Final window: %.1f min remaining, jumping to full target",
             remaining_minutes,
-            ramp_progress,
-            fraction,
         )
     else:
         # Early hour: use conservative fraction
@@ -842,7 +839,7 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Args:
             needed_reduction_kw: How much power needs to be reduced now
             effective_target_kwh: The current effective target (accounting for
-                conservative early-hour strategy and ramp-up)
+                conservative early-hour strategy and final-window jump)
             projected_end_kwh: Projected energy usage at end of hour
             current_power_kw: Current instant power consumption
             remaining_minutes: Minutes remaining in the current hour

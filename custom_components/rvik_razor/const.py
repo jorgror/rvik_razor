@@ -50,7 +50,7 @@ DEFAULT_VOLTAGE = 400
 DEFAULT_LOAD_TIMEOUT = 120  # seconds between regulations for a load
 # Conservative target strategy defaults
 DEFAULT_BASE_TARGET_FRACTION = 0.75  # Target 75% of max early in the hour
-DEFAULT_RAMP_START_MINUTES = 15.0  # Start ramping up with 15 minutes remaining
+DEFAULT_RAMP_START_MINUTES = 15.0  # Final window before jumping to full target
 
 # Fallback ampere limits when entity doesn't provide them
 FALLBACK_MIN_AMPERE = 0

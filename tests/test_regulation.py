@@ -43,7 +43,7 @@ def create_test_load(
 
 
 class TestConservativeTargetStrategy:
-    """Test the conservative target strategy with linear ramp-up."""
+    """Test the conservative target strategy with final-window jump."""
 
     def test_early_hour_uses_base_fraction(self):
         """Test that early in the hour we use the conservative base fraction."""
@@ -60,10 +60,10 @@ class TestConservativeTargetStrategy:
         assert fraction == 0.75
         assert effective_target == 3.75  # 5.0 * 0.75
 
-    def test_ramp_start_begins_increasing(self):
-        """Test that at ramp start we begin increasing toward 100%."""
+    def test_jump_window_start_uses_full_target(self):
+        """Test that at jump window start we switch to 100%."""
         max_kwh = 5.0
-        remaining_minutes = 15.0  # Exactly at ramp start
+        remaining_minutes = 15.0  # Exactly at jump window start
 
         effective_target, fraction = calculate_effective_target(
             max_hour_kwh=max_kwh,
@@ -72,14 +72,13 @@ class TestConservativeTargetStrategy:
             ramp_start_minutes=15.0,
         )
 
-        # At ramp start (progress=0), should still be at base fraction
-        assert fraction == 0.75
-        assert effective_target == 3.75
+        assert fraction == 1.0
+        assert effective_target == 5.0
 
-    def test_halfway_through_ramp(self):
-        """Test target halfway through the ramp period."""
+    def test_inside_jump_window_uses_full_target(self):
+        """Test that any time inside final window uses 100% target."""
         max_kwh = 5.0
-        remaining_minutes = 7.5  # Halfway through 15-minute ramp
+        remaining_minutes = 7.5  # Inside 15-minute final window
 
         effective_target, fraction = calculate_effective_target(
             max_hour_kwh=max_kwh,
@@ -88,9 +87,8 @@ class TestConservativeTargetStrategy:
             ramp_start_minutes=15.0,
         )
 
-        # Halfway: fraction = 0.75 + (1.0 - 0.75) * 0.5 = 0.875
-        assert fraction == pytest.approx(0.875, rel=0.01)
-        assert effective_target == pytest.approx(4.375, rel=0.01)
+        assert fraction == 1.0
+        assert effective_target == 5.0
 
     def test_end_of_hour_reaches_100_percent(self):
         """Test that at end of hour we reach 100% of max."""
