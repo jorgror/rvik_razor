@@ -89,24 +89,26 @@ def calculate_available_down_capacity(loads: list[Load]) -> float:
                     total_capacity += load.assumed_power_kw or 0.0
 
         elif load.load_type == LoadType.EV_AMPERE:
-            # For EV chargers, prefer measured power if available
-            if load.current_power_kw is not None and load.current_power_kw > 0:
+            # For EV chargers, prefer formula-based calculation from amperage.
+            # Sensor/cached values are fallback when amperage is unavailable.
+            if load.current_ampere is not None and load.current_ampere > 0:
+                power_per_ampere = _calculate_nominal_power_per_ampere(load)
+                if power_per_ampere > 0:
+                    total_capacity += load.current_ampere * power_per_ampere
+                elif load.current_power_kw is not None and load.current_power_kw > 0:
+                    total_capacity += load.current_power_kw
+                    _LOGGER.debug(
+                        "Load %s: fallback to measured power %.3f kW for capacity",
+                        load.name,
+                        load.current_power_kw,
+                    )
+            elif load.current_power_kw is not None and load.current_power_kw > 0:
                 total_capacity += load.current_power_kw
                 _LOGGER.debug(
-                    "Load %s: using measured power %.3f kW for capacity",
+                    "Load %s: using measured power %.3f kW for capacity (ampere unavailable)",
                     load.name,
                     load.current_power_kw,
                 )
-            elif load.current_ampere is not None and load.current_ampere > 0:
-                # Calculate from current amperage
-                if load.measured_power_per_ampere is not None:
-                    total_capacity += (
-                        load.current_ampere * load.measured_power_per_ampere
-                    )
-                else:
-                    # Calculate from configured phases and voltage
-                    power_per_ampere = _calculate_nominal_power_per_ampere(load)
-                    total_capacity += load.current_ampere * power_per_ampere
 
     return total_capacity
 
@@ -418,18 +420,19 @@ def _calculate_load_reduction_potential(load: Load) -> float:
             return 0.0
 
     elif load.load_type == LoadType.EV_AMPERE:
-        # For EV chargers, prefer measured power
-        if load.current_power_kw is not None and load.current_power_kw > 0:
-            return load.current_power_kw
-        elif load.current_ampere is not None and load.current_ampere > 0:
-            # Calculate potential reduction from current amperage
-            # Use stored power ratio or calculate from config
+        # For EV chargers, prefer formula-based calculation from amperage.
+        if load.current_ampere is not None and load.current_ampere > 0:
+            power_per_ampere = _calculate_nominal_power_per_ampere(load)
+            if power_per_ampere > 0:
+                return load.current_ampere * power_per_ampere
+            if load.current_power_kw is not None and load.current_power_kw > 0:
+                return load.current_power_kw
             if load.measured_power_per_ampere is not None:
                 return load.current_ampere * load.measured_power_per_ampere
-            else:
-                # Calculate from configured phases and voltage
-                power_per_ampere = _calculate_nominal_power_per_ampere(load)
-                return load.current_ampere * power_per_ampere
+            return 0.0
+        elif load.current_power_kw is not None and load.current_power_kw > 0:
+            # Fallback when amperage isn't available
+            return load.current_power_kw
         else:
             # Already at 0A or unknown
             return 0.0
@@ -931,9 +934,12 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if current_ampere <= entity_min:
             return 0.0  # Already at minimum
 
-        # Get actual current power from power sensor if available
-        current_power_kw: float = 0.0
-        power_per_ampere: float | None = None
+        # Formula first: nominal kW/A from configured phases + voltage.
+        # Sensor/cached ratios are only fallback if nominal is invalid.
+        power_per_ampere = _calculate_nominal_power_per_ampere(load)
+        current_power_kw = current_ampere * power_per_ampere if power_per_ampere > 0 else 0.0
+        measured_ratio: float | None = None
+        measured_power_kw: float | None = None
 
         if load.power_sensor_entity_id:
             power_state = self.hass.states.get(load.power_sensor_entity_id)
@@ -941,29 +947,19 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 try:
                     power_value = float(power_state.state)
                     unit = power_state.attributes.get("unit_of_measurement", "W")
-                    current_power_kw = (
-                        power_value / 1000.0 if unit == "W" else power_value
-                    )
+                    measured_power_kw = power_value / 1000.0 if unit == "W" else power_value
                     # Calculate and store power per ampere from actual measurement
                     # Only calculate if we have both power and amperage > 0
-                    if current_ampere > 0 and current_power_kw > 0.1:
-                        power_per_ampere = current_power_kw / current_ampere
+                    if current_ampere > 0 and measured_power_kw > 0.1:
+                        measured_ratio = measured_power_kw / current_ampere
                         # Store this measurement for future use
-                        load.measured_power_per_ampere = power_per_ampere
+                        load.measured_power_per_ampere = measured_ratio
                         _LOGGER.debug(
-                            "%s: Measured %.2fkW at %dA = %.2fkW/A (stored for future use)",
+                            "%s: Measured %.2fkW at %dA = %.2fkW/A (stored, nominal=%.2fkW/A)",
                             load.name,
-                            current_power_kw,
+                            measured_power_kw,
                             current_ampere,
-                            power_per_ampere,
-                        )
-                    elif load.measured_power_per_ampere is not None:
-                        # Use previously measured ratio if current power is zero/low
-                        power_per_ampere = load.measured_power_per_ampere
-                        current_power_kw = power_per_ampere * current_ampere
-                        _LOGGER.debug(
-                            "%s: Using stored power ratio %.2fkW/A (current power too low)",
-                            load.name,
+                            measured_ratio,
                             power_per_ampere,
                         )
                 except (ValueError, TypeError) as err:
@@ -971,27 +967,34 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "Failed to read power sensor for %s: %s", load.name, err
                     )
 
-        # Use stored measured ratio if available, otherwise calculate from config
-        if power_per_ampere is None:
-            if load.measured_power_per_ampere is not None:
+        # Fallback only if nominal formula produced an invalid ratio.
+        if power_per_ampere <= 0:
+            if measured_ratio is not None and measured_power_kw is not None:
+                power_per_ampere = measured_ratio
+                current_power_kw = measured_power_kw
+                _LOGGER.debug(
+                    "%s: Nominal kW/A invalid, using measured ratio %.2fkW/A",
+                    load.name,
+                    power_per_ampere,
+                )
+            elif load.measured_power_per_ampere is not None:
                 power_per_ampere = load.measured_power_per_ampere
                 current_power_kw = power_per_ampere * current_ampere
                 _LOGGER.debug(
-                    "%s: Using stored power ratio %.2fkW/A",
+                    "%s: Nominal kW/A invalid, using stored ratio %.2fkW/A",
                     load.name,
                     power_per_ampere,
                 )
             else:
-                # Calculate from configured phases and voltage
-                power_per_ampere = _calculate_nominal_power_per_ampere(load)
-                current_power_kw = power_per_ampere * current_ampere
-                _LOGGER.debug(
-                    "%s: Using configured %dV %d-phase (%.2fkW/A)",
-                    load.name,
-                    load.voltage,
-                    load.phases,
-                    power_per_ampere,
-                )
+                return 0.0
+        else:
+            _LOGGER.debug(
+                "%s: Using configured %dV %d-phase (%.2fkW/A) for reduction",
+                load.name,
+                load.voltage,
+                load.phases,
+                power_per_ampere,
+            )
 
         # Calculate target ampere based on needed reduction
         # Target power = current power - needed reduction
@@ -1232,8 +1235,10 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         entity_min = state.attributes.get("min", FALLBACK_MIN_AMPERE)
         entity_max = state.attributes.get("max", FALLBACK_MAX_AMPERE)
 
-        # Get power per ampere ratio
-        power_per_ampere = None
+        # Formula first: nominal kW/A from configured phases + voltage.
+        # Sensor/cached ratios are only fallback if nominal is invalid.
+        power_per_ampere = _calculate_nominal_power_per_ampere(load)
+        measured_ratio: float | None = None
 
         # Try to measure current power if sensor is available
         if load.power_sensor_entity_id:
@@ -1247,26 +1252,33 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                     # Only calculate ratio if we have meaningful readings
                     if current_ampere > 0 and current_power_kw > 0.1:
-                        power_per_ampere = current_power_kw / current_ampere
+                        measured_ratio = current_power_kw / current_ampere
                         # Update stored measurement
-                        load.measured_power_per_ampere = power_per_ampere
+                        load.measured_power_per_ampere = measured_ratio
                 except (ValueError, TypeError) as err:
                     _LOGGER.warning(
                         "Failed to read power sensor for %s: %s", load.name, err
                     )
 
-        # Use stored measured ratio if available and current measurement failed
-        if power_per_ampere is None and load.measured_power_per_ampere is not None:
-            power_per_ampere = load.measured_power_per_ampere
-            _LOGGER.debug(
-                "%s: Using stored power ratio %.2fkW/A for restoration",
-                load.name,
-                power_per_ampere,
-            )
-
-        # Fallback: use configured phases and voltage
-        if power_per_ampere is None:
-            power_per_ampere = _calculate_nominal_power_per_ampere(load)
+        # Fallback only if nominal formula produced an invalid ratio.
+        if power_per_ampere <= 0:
+            if measured_ratio is not None:
+                power_per_ampere = measured_ratio
+                _LOGGER.debug(
+                    "%s: Nominal kW/A invalid, using measured ratio %.2fkW/A for restoration",
+                    load.name,
+                    power_per_ampere,
+                )
+            elif load.measured_power_per_ampere is not None:
+                power_per_ampere = load.measured_power_per_ampere
+                _LOGGER.debug(
+                    "%s: Nominal kW/A invalid, using stored ratio %.2fkW/A for restoration",
+                    load.name,
+                    power_per_ampere,
+                )
+            else:
+                return False
+        else:
             _LOGGER.debug(
                 "%s: Using configured %dV %d-phase (%.2fkW/A) for restoration",
                 load.name,

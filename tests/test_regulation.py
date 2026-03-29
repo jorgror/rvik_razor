@@ -284,8 +284,8 @@ class TestAvailableDownCapacity:
         capacity = calculate_available_down_capacity(loads)
         assert capacity == 2.0
 
-    def test_ev_charger_measured_power_preferred(self):
-        """Test that EV charger uses measured power when available."""
+    def test_ev_charger_formula_preferred_over_measured(self):
+        """Test that EV charger uses formula-based power before measured power."""
         loads = [
             create_test_load(
                 name="EV Charger",
@@ -299,7 +299,24 @@ class TestAvailableDownCapacity:
         ]
 
         capacity = calculate_available_down_capacity(loads)
-        # Should use measured 10.5 kW, not calculated from amperage
+        # Should use formula-based 11.08 kW, not measured 10.5 kW
+        assert capacity == pytest.approx(11.08, rel=0.02)
+
+    def test_ev_charger_measured_power_fallback_when_ampere_unavailable(self):
+        """Test measured power fallback when ampere value isn't available."""
+        loads = [
+            create_test_load(
+                name="EV Charger",
+                load_type=LoadType.EV_AMPERE,
+                enabled=True,
+                current_ampere=None,
+                phases=3,
+                voltage=400,
+                current_power_kw=10.5,
+            )
+        ]
+
+        capacity = calculate_available_down_capacity(loads)
         assert capacity == 10.5
 
     def test_mixed_measured_and_assumed_loads(self):
