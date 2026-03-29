@@ -13,6 +13,7 @@ import pytest
 
 from custom_components.rvik_razor.const import Load, LoadType
 from custom_components.rvik_razor.coordinator import (
+    _calculate_nominal_power_per_ampere,
     calculate_available_down_capacity,
     calculate_effective_target,
     calculate_regulation_decision,
@@ -323,6 +324,28 @@ class TestAvailableDownCapacity:
         capacity = calculate_available_down_capacity(loads)
         # 1.7 (measured) + 1.5 (assumed) = 3.2
         assert capacity == 3.2
+
+
+class TestPowerPerAmpere:
+    """Test nominal power-per-ampere fallback calculations."""
+
+    def test_nominal_power_per_ampere_single_phase(self):
+        """1-phase fallback uses P = V * I."""
+        load = create_test_load(
+            load_type=LoadType.EV_AMPERE,
+            phases=1,
+            voltage=230,
+        )
+        assert _calculate_nominal_power_per_ampere(load) == pytest.approx(0.23)
+
+    def test_nominal_power_per_ampere_three_phase(self):
+        """3-phase fallback uses P = sqrt(3) * V * I."""
+        load = create_test_load(
+            load_type=LoadType.EV_AMPERE,
+            phases=3,
+            voltage=400,
+        )
+        assert _calculate_nominal_power_per_ampere(load) == pytest.approx(0.6928, rel=1e-3)
 
 
 class TestRegulationDecisions:

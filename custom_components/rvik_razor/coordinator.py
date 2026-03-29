@@ -34,6 +34,17 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
+def _calculate_nominal_power_per_ampere(load: Load) -> float:
+    """Calculate nominal kW per ampere from configured electrical setup.
+
+    For 1-phase AC: P = V * I
+    For 3-phase AC: P = sqrt(3) * V * I
+    """
+    if load.phases == 3:
+        return (load.voltage * 1.732) / 1000.0  # sqrt(3) ≈ 1.732
+    return load.voltage / 1000.0
+
+
 def calculate_available_down_capacity(loads: list[Load]) -> float:
     """Calculate total available downward control capacity.
 
@@ -94,10 +105,7 @@ def calculate_available_down_capacity(loads: list[Load]) -> float:
                     )
                 else:
                     # Calculate from configured phases and voltage
-                    if load.phases == 3:
-                        power_per_ampere = (load.voltage * 1.732) / 1000.0
-                    else:
-                        power_per_ampere = load.voltage / 1000.0
+                    power_per_ampere = _calculate_nominal_power_per_ampere(load)
                     total_capacity += load.current_ampere * power_per_ampere
 
     return total_capacity
@@ -465,10 +473,7 @@ def _calculate_load_reduction_potential(load: Load) -> float:
                 return load.current_ampere * load.measured_power_per_ampere
             else:
                 # Calculate from configured phases and voltage
-                if load.phases == 3:
-                    power_per_ampere = (load.voltage * 1.732) / 1000.0
-                else:
-                    power_per_ampere = load.voltage / 1000.0
+                power_per_ampere = _calculate_nominal_power_per_ampere(load)
                 return load.current_ampere * power_per_ampere
         else:
             # Already at 0A or unknown
@@ -1021,12 +1026,7 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             else:
                 # Calculate from configured phases and voltage
-                # For 1-phase: P = V × I
-                # For 3-phase: P = √3 × V × I
-                if load.phases == 3:
-                    power_per_ampere = (load.voltage * 1.732) / 1000.0  # √3 ≈ 1.732
-                else:
-                    power_per_ampere = load.voltage / 1000.0
+                power_per_ampere = _calculate_nominal_power_per_ampere(load)
                 current_power_kw = power_per_ampere * current_ampere
                 _LOGGER.debug(
                     "%s: Using configured %dV %d-phase (%.2fkW/A)",
@@ -1309,7 +1309,7 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Fallback: use configured phases and voltage
         if power_per_ampere is None:
-            power_per_ampere = (load.voltage * load.phases) / 1000.0  # kW per ampere
+            power_per_ampere = _calculate_nominal_power_per_ampere(load)
             _LOGGER.debug(
                 "%s: Using configured %dV %d-phase (%.2fkW/A) for restoration",
                 load.name,
