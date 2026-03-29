@@ -256,9 +256,7 @@ def calculate_regulation_decision(
         remaining_reduction = needed_reduction_kw
         loads_to_reduce = []
 
-        # Track loads on cooldown that have reduction potential
-        # These are loads we should wait for instead of reducing higher priority loads
-        loads_on_cooldown_with_capacity = []
+        loads_in_cooldown = []
 
         for load in sorted_loads:
             if remaining_reduction <= 0.01:
@@ -271,53 +269,20 @@ def calculate_regulation_decision(
             # Check cooldown (use per-load timeout)
             load_timeout = load.timeout
             if current_time - load.last_action_time < load_timeout:
-                # Load is on cooldown - check if it has reduction potential
-                potential = _calculate_load_reduction_potential(load)
-                if potential > 0:
-                    loads_on_cooldown_with_capacity.append(
-                        {
-                            "load": load,
-                            "potential_kw": potential,
-                            "cooldown_remaining": load_timeout
-                            - (current_time - load.last_action_time),
-                        }
-                    )
-                    _LOGGER.debug(
-                        "Load %s in cooldown (%.0fs remaining), has %.2fkW reduction potential",
-                        load.name,
-                        load_timeout - (current_time - load.last_action_time),
-                        potential,
-                    )
-                else:
-                    _LOGGER.debug(
-                        "Load %s in cooldown, no reduction potential (already reduced)",
-                        load.name,
-                    )
+                cooldown_remaining = load_timeout - (current_time - load.last_action_time)
+                loads_in_cooldown.append(
+                    {"name": load.name, "cooldown_remaining": cooldown_remaining}
+                )
+                _LOGGER.debug(
+                    "Load %s in cooldown (%.0fs remaining), skipping and checking next priority load",
+                    load.name,
+                    cooldown_remaining,
+                )
                 continue
 
             # Calculate what reduction this load can provide
             reduction_info = _calculate_load_reduction(load, remaining_reduction)
             if reduction_info:
-                # Before adding this load to reduction list, check if lower priority
-                # loads on cooldown could provide enough reduction
-                # (lower priority = already processed, so check accumulated potential)
-                total_cooldown_potential = sum(
-                    lc["potential_kw"] for lc in loads_on_cooldown_with_capacity
-                )
-
-                if total_cooldown_potential >= remaining_reduction:
-                    # Lower priority loads on cooldown can cover the remaining need
-                    # Don't reduce this higher priority load - wait for cooldown
-                    _LOGGER.debug(
-                        "Load %s (pri=%d): skipping - lower priority loads on cooldown "
-                        "have %.2fkW potential >= %.2fkW needed",
-                        load.name,
-                        load.priority,
-                        total_cooldown_potential,
-                        remaining_reduction,
-                    )
-                    continue
-
                 loads_to_reduce.append(reduction_info)
                 _LOGGER.debug(
                     "Load %s (pri=%d): planned reduction=%.2fkW, remaining=%.2fkW -> %.2fkW",
@@ -338,26 +303,16 @@ def calculate_regulation_decision(
         result["loads_to_reduce"] = loads_to_reduce
         result["remaining_reduction"] = remaining_reduction
 
-        # Determine the reason based on what happened
-        total_cooldown_potential = sum(
-            lc["potential_kw"] for lc in loads_on_cooldown_with_capacity
-        )
-
         if loads_to_reduce:
             result["reason"] = (
                 f"Need {needed_reduction_kw:.2f}kW reduction, planning to reduce {len(loads_to_reduce)} load(s)"
             )
-        elif total_cooldown_potential >= needed_reduction_kw:
-            # No loads to reduce because we're waiting for cooldown
-            cooldown_names = [lc["load"].name for lc in loads_on_cooldown_with_capacity]
-            min_cooldown = min(
-                lc["cooldown_remaining"] for lc in loads_on_cooldown_with_capacity
-            )
-            result["action"] = "none"  # Change action to none - we're waiting
+        elif loads_in_cooldown:
+            cooldown_names = [lc["name"] for lc in loads_in_cooldown]
+            min_cooldown = min(lc["cooldown_remaining"] for lc in loads_in_cooldown)
             result["reason"] = (
-                f"Need {needed_reduction_kw:.2f}kW reduction, waiting for cooldown on "
-                f"{', '.join(cooldown_names)} (potential: {total_cooldown_potential:.2f}kW, "
-                f"next available in {min_cooldown:.0f}s)"
+                f"Need {needed_reduction_kw:.2f}kW but no loads available to reduce now "
+                f"(cooldown: {', '.join(cooldown_names)}, next available in {min_cooldown:.0f}s)"
             )
         else:
             result["reason"] = (
@@ -908,7 +863,7 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         failed_actions = []
 
         _LOGGER.info(
-            "Executing %d reduction plans: %s",
+            "Evaluating %d reduction plans (max 1 successful action this loop): %s",
             len(reduction_plans),
             [p["load"].name for p in reduction_plans],
         )
@@ -924,6 +879,8 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if reduction_achieved > 0:
                 load.last_action_time = current_time
                 actions_taken.append(f"{load.name}: -{reduction_achieved:.2f}kW")
+                # Only reduce one load per control loop to avoid overshooting.
+                break
             else:
                 failed_actions.append(load.name)
                 _LOGGER.warning(

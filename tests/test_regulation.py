@@ -5,6 +5,7 @@ This module tests the core regulation decision-making logic in isolation.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -14,6 +15,7 @@ import pytest
 from custom_components.rvik_razor.const import Load, LoadType
 from custom_components.rvik_razor.coordinator import (
     _calculate_nominal_power_per_ampere,
+    RvikRazorCoordinator,
     calculate_available_down_capacity,
     calculate_effective_target,
     calculate_regulation_decision,
@@ -967,15 +969,10 @@ class TestIncidentRecreation:
 
 
 class TestTimeoutLoadBehavior:
-    """Test that loads on timeout with reduction capacity cause waiting.
+    """Test that loads in cooldown are skipped during reduction planning."""
 
-    When a lower priority load is on timeout but COULD be reduced (has capacity),
-    we should wait for its cooldown rather than reducing a higher priority load.
-    This avoids unnecessary wear on high priority equipment.
-    """
-
-    def test_wait_for_low_priority_cooldown_instead_of_reducing_high_priority(self):
-        """Test that we wait for low priority load cooldown instead of reducing high priority.
+    def test_skip_low_priority_cooldown_and_reduce_high_priority(self):
+        """Test that cooldown loads are skipped and higher priority can be reduced.
 
         Scenario:
         - Low priority load (pri=10) is ON and on cooldown (recently restored)
@@ -983,7 +980,7 @@ class TestTimeoutLoadBehavior:
         - We need 2kW reduction
         - Low priority load could provide 3kW if reduced
 
-        Expected: Wait for low priority cooldown, don't reduce high priority
+        Expected: Reduce high priority because low priority is in cooldown
         """
         current_time = time.time()
 
@@ -1015,18 +1012,11 @@ class TestTimeoutLoadBehavior:
             current_time=current_time,
         )
 
-        # The low priority load CAN provide the needed reduction once cooldown expires.
-        # We should NOT reduce the high priority load - wait for cooldown instead.
+        # Low priority is in cooldown, so high priority should be used.
         load_names = [p["load"].name for p in decision["loads_to_reduce"]]
-        assert "High Priority" not in load_names, (
-            "High priority load should NOT be reduced when low priority "
-            "load on cooldown has enough capacity to provide the reduction"
+        assert "High Priority" in load_names, (
+            "High priority load should be reduced when lower priority load is in cooldown"
         )
-        # The reason should indicate we're waiting for cooldown
-        assert (
-            "waiting" in decision["reason"].lower()
-            or "cooldown" in decision["reason"].lower()
-        ), f"Reason should mention waiting for cooldown: {decision['reason']}"
 
     def test_reduce_high_priority_when_low_priority_cannot_provide_enough(self):
         """Test that we reduce high priority when low priority can't cover the need.
@@ -1124,7 +1114,7 @@ class TestTimeoutLoadBehavior:
         ), "High priority should be reduced when low priority is already off"
 
     def test_multiple_low_priority_loads_cover_reduction(self):
-        """Test that multiple low priority loads on cooldown together can cover reduction.
+        """Test that cooldown loads are skipped even if they could cover reduction.
 
         Scenario:
         - Pri 10: 1.5kW capacity, on cooldown
@@ -1132,7 +1122,7 @@ class TestTimeoutLoadBehavior:
         - Pri 50: 3kW capacity, not on cooldown
         - Need 2.5kW
 
-        Expected: Wait - pri 10 + pri 20 = 3kW > 2.5kW needed
+        Expected: Reduce high priority load because lower priorities are in cooldown
         """
         current_time = time.time()
 
@@ -1170,11 +1160,10 @@ class TestTimeoutLoadBehavior:
             current_time=current_time,
         )
 
-        # Combined low priority loads can cover the need
+        # Lower priority loads are in cooldown, so high priority should be reduced.
         load_names = [p["load"].name for p in decision["loads_to_reduce"]]
-        assert "High Priority" not in load_names, (
-            "High priority should not be reduced - combined low priority loads "
-            "on cooldown can cover the needed reduction"
+        assert "High Priority" in load_names, (
+            "High priority should be reduced when lower priority loads are in cooldown"
         )
 
     def test_inverted_switch_on_cooldown_can_provide_reduction(self):
@@ -1213,11 +1202,10 @@ class TestTimeoutLoadBehavior:
             current_time=current_time,
         )
 
-        # Inverted switch at OFF can be turned ON to reduce - wait for cooldown
+        # Inverted switch is in cooldown, so high priority should be reduced.
         load_names = [p["load"].name for p in decision["loads_to_reduce"]]
-        assert "High Priority" not in load_names, (
-            "High priority should not be reduced - inverted switch on cooldown "
-            "can provide the reduction once cooldown expires"
+        assert "High Priority" in load_names, (
+            "High priority should be reduced when inverted switch is in cooldown"
         )
 
     def test_ev_charger_on_cooldown_with_capacity(self):
@@ -1258,11 +1246,10 @@ class TestTimeoutLoadBehavior:
             current_time=current_time,
         )
 
-        # EV charger can still be reduced - wait for its cooldown
+        # EV charger is in cooldown, so high priority should be reduced.
         load_names = [p["load"].name for p in decision["loads_to_reduce"]]
-        assert "High Priority" not in load_names, (
-            "High priority should not be reduced - EV charger on cooldown "
-            "has capacity to reduce once cooldown expires"
+        assert "High Priority" in load_names, (
+            "High priority should be reduced when EV charger is in cooldown"
         )
 
     def test_ev_charger_on_cooldown_at_minimum(self):
@@ -1344,6 +1331,71 @@ class TestTimeoutLoadBehavior:
         load_names = [p["load"].name for p in decision["loads_to_reduce"]]
         assert "Low Priority" in load_names
         assert "High Priority" not in load_names
+
+
+class TestReductionExecution:
+    """Test reduction execution behavior."""
+
+    def test_execute_reductions_stops_after_first_success(self):
+        """Test that only one successful reduction is executed per control loop."""
+        coordinator = RvikRazorCoordinator.__new__(RvikRazorCoordinator)
+        coordinator.last_action = ""
+        coordinator.last_action_reason = ""
+
+        reduced_loads = []
+
+        async def fake_reduce(load: Load, needed_reduction: float) -> float:
+            reduced_loads.append((load.name, needed_reduction))
+            return 1.0
+
+        coordinator._async_reduce_single_load = fake_reduce
+
+        load1 = create_test_load(name="Load 1")
+        load2 = create_test_load(name="Load 2")
+        plans = [
+            {"load": load1, "needed_reduction": 2.0},
+            {"load": load2, "needed_reduction": 1.0},
+        ]
+
+        current_time = 12345.0
+        asyncio.run(coordinator._async_execute_reductions(plans, current_time))
+
+        assert reduced_loads == [("Load 1", 2.0)]
+        assert load1.last_action_time == current_time
+        assert load2.last_action_time == 0.0
+        assert "Load 1" in coordinator.last_action_reason
+        assert "Load 2" not in coordinator.last_action_reason
+
+    def test_execute_reductions_tries_next_plan_after_failed_attempt(self):
+        """Test that execution can move to the next plan if first reduction fails."""
+        coordinator = RvikRazorCoordinator.__new__(RvikRazorCoordinator)
+        coordinator.last_action = ""
+        coordinator.last_action_reason = ""
+
+        call_order = []
+
+        async def fake_reduce(load: Load, needed_reduction: float) -> float:
+            call_order.append((load.name, needed_reduction))
+            if load.name == "Load 1":
+                return 0.0
+            return 1.5
+
+        coordinator._async_reduce_single_load = fake_reduce
+
+        load1 = create_test_load(name="Load 1")
+        load2 = create_test_load(name="Load 2")
+        plans = [
+            {"load": load1, "needed_reduction": 2.0},
+            {"load": load2, "needed_reduction": 1.0},
+        ]
+
+        current_time = 12345.0
+        asyncio.run(coordinator._async_execute_reductions(plans, current_time))
+
+        assert call_order == [("Load 1", 2.0), ("Load 2", 1.0)]
+        assert load1.last_action_time == 0.0
+        assert load2.last_action_time == current_time
+        assert "Load 2" in coordinator.last_action_reason
 
 
 if __name__ == "__main__":
