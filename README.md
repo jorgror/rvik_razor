@@ -4,7 +4,7 @@
 [![GitHub Release](https://img.shields.io/github/release/jorgror/rvik_razor.svg)](https://github.com/jorgror/rvik_razor/releases)
 [![License](https://img.shields.io/github/license/jorgror/rvik_razor.svg)](LICENSE)
 
-RVik Razor automatically controls your EV charger and other loads to keep your **hourly energy consumption below a configurable limit** — protecting you from grid tariff peaks.
+RVik Razor automatically controls your EV charger and other loads to keep your **hourly energy consumption near a configurable set point** — protecting you from grid tariff peaks.
 
 > **Works great with Zaptec, Easee, and any EV charger exposed as a `number` entity (ampere control), as well as any `switch`-based load (e.g. heat pump, water heater).**
 
@@ -15,8 +15,8 @@ RVik Razor automatically controls your EV charger and other loads to keep your *
 ### Core Functionality
 - **Hourly Energy Monitoring**: Tracks current hour energy consumption from a sensor
 - **Power Projection**: Estimates end-of-hour energy usage based on current power consumption
-- **Automatic Load Control**: Reduces or turns off loads when approaching the hourly limit
-- **Smart Restoration**: Gradually restores loads when sufficient margin exists
+- **Automatic Load Control**: Reduces or restores loads when projected hourly consumption drifts from the set point
+- **Smart Restoration**: Restores loads only when they can stay restored to the end of the hour without reducing accuracy
 
 ### Supported Load Types
 1. **EV Charger (Ampere Control)**: Incrementally reduces charging amperage
@@ -30,11 +30,11 @@ RVik Razor automatically controls your EV charger and other loads to keep your *
 ### Operation Modes
 - **Off**: All control disabled, loads restored to original state
 - **Monitor**: Only monitors and reports, no control actions
-- **Control**: Active control to stay within limits
+- **Control**: Active control to stay near the hourly set point
 
 ### Configuration
 - **Config Flow**: Full UI-based setup
-- **Options Flow**: Add/remove loads, adjust priorities and limits
+- **Options Flow**: Add/remove loads, adjust priorities and set point
 - **Load Priority**: Lower numbers are reduced first
 - **Cooldown**: 120-second cooldown between load changes to prevent flapping
 
@@ -45,8 +45,8 @@ RVik Razor automatically controls your EV charger and other loads to keep your *
 2. Click "Add Integration"
 3. Search for "RVik Razor"
 4. Select your **Energy this hour** sensor (required)
-5. Select your **House power** sensor (optional but recommended)
-6. Set **Max kWh per hour** limit
+5. Select your **House power** sensor (required for Control mode)
+6. Set **Hourly set point**
 7. Choose initial **Mode** (recommend starting with Monitor)
 
 ### 2. Add Loads
@@ -66,47 +66,51 @@ RVik Razor automatically controls your EV charger and other loads to keep your *
 2. Check the sensors:
    - **Current hour kWh**: Real-time consumption
    - **Projected end hour kWh**: Estimated end-of-hour total
-   - **Needed reduction**: How much power needs to be cut
+   - **Projection error**: Difference between projected end-of-hour consumption and the set point
 3. Switch to **Control** mode when ready
 
 ## Entities Created
 
 ### Control Entities
-- `number.rvik_razor_max_hour_kwh`: Set the hourly energy limit
+- `number.rvik_razor_max_hour_kwh`: Set the hourly energy set point
 - `select.rvik_razor_mode`: Change operation mode (Off/Monitor/Control)
 
 ### Monitoring Sensors
 - `sensor.rvik_razor_current_hour_kwh`: Current hour energy consumption
 - `sensor.rvik_razor_projected_end_hour_kwh`: Projected end-of-hour consumption
   - Attributes: remaining_seconds, house_power_kw, last_action, last_action_reason, mode
-- `sensor.rvik_razor_needed_reduction`: Power reduction needed to stay within limit
+- `sensor.rvik_razor_projection_error`: Difference between projected end-of-hour consumption and the set point
 
 ## How It Works
 
 ### Estimation Logic
 ```
 projected_end_kwh = current_hour_kwh + (house_power_kw × remaining_seconds / 3600)
-needed_reduction_kw = (projected_end_kwh - max_hour_kwh) × 3600 / remaining_seconds
+projection_error_kwh = projected_end_kwh - hourly_set_point_kwh
 ```
 
 ### Control Logic
-1. **Reduction Phase** (when projected > limit):
-   - Sort loads by priority (lowest first)
-   - For each load (respecting cooldown):
-     - EV: Reduce ampere by step_ampere
-     - Switch: Turn off
-   - Continue until needed_reduction_kw ≤ 0
+1. **Direction first**:
+   - If projection is above the set point by more than 0.02 kWh, try to reduce.
+   - If projection is below the set point by more than 0.02 kWh, try to restore.
+   - If projection is within 0.02 kWh, do nothing.
 
-2. **Restoration Phase** (when projected < limit - margin):
-   - Sort loads by priority (highest first)
-   - Restore one load at a time
-   - Wait for next cycle before restoring more
+2. **Priority order**:
+   - Reduction considers lower priority numbers first.
+   - Restoration considers higher priority numbers first.
+   - Disabled, unavailable, cooling-down, already-saturated, or unknown-power loads are skipped.
+   - If the first eligible load would not improve accuracy enough, RVik Razor waits instead of trying a better-fitting lower-priority candidate.
 
-3. **Safety Features**:
+3. **Candidate projection**:
+   - For each candidate, RVik Razor subtracts the load's current estimated power and adds the candidate estimated power.
+   - Switch loads are binary candidates.
+   - EV chargers choose the ampere value in the requested direction that projects closest to the hourly set point.
+   - Only one successful load action is executed per control cycle.
+
+4. **Safety Features**:
    - 120-second cooldown per load between actions
-   - Stores original values for restoration
    - Hour rollover detection and reset
-   - Graceful handling of unavailable sensors
+   - Control pauses for the cycle when house power is unavailable
 
 ## Configuration Examples
 

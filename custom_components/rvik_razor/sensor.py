@@ -13,7 +13,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfEnergy, UnitOfPower
+from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -57,27 +57,14 @@ SENSORS: tuple[RvikRazorSensorEntityDescription, ...] = (
         },
     ),
     RvikRazorSensorEntityDescription(
-        key="needed_reduction_kw",
-        name="Needed reduction",
-        icon="mdi:arrow-down-bold",
-        native_unit_of_measurement=UnitOfPower.KILO_WATT,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: data.get("needed_reduction_kw"),
-    ),
-    RvikRazorSensorEntityDescription(
-        key="effective_target_kwh",
-        name="Effective target",
+        key="projection_error_kwh",
+        name="Projection error",
         icon="mdi:target",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: data.get("effective_target_kwh"),
+        value_fn=lambda data: data.get("projection_error_kwh"),
         attributes_fn=lambda data: {
-            "max_hour_kwh": data.get("max_hour_kwh"),
-            "target_fraction": (
-                f"{data.get('target_fraction', 0) * 100:.0f}%"
-                if data.get("target_fraction") is not None
-                else None
-            ),
+            "hourly_set_point_kwh": data.get("max_hour_kwh"),
             "available_down_capacity_kw": data.get("available_down_capacity_kw"),
         },
     ),

@@ -10,16 +10,16 @@
       },
       "power_sensor": {
         "title": "Power sensor (optional)",
-        "description": "Select a power sensor for better predictions. This is recommended but not required.",
+        "description": "Select a power sensor for projections. Control mode pauses when house power is unavailable.",
         "data": {
           "house_power_sensor": "House power sensor (optional)"
         }
       },
       "limits": {
-        "title": "Set limits",
-        "description": "Configure the maximum hourly energy limit and operation mode.",
+        "title": "Set point",
+        "description": "Configure the hourly energy set point and operation mode.",
         "data": {
-          "max_hour_kwh": "Maximum kWh per hour",
+          "max_hour_kwh": "Hourly set point (kWh)",
           "mode": "Operation mode"
         }
       }
@@ -84,12 +84,10 @@
       },
       "edit_limits": {
         "title": "Edit limits",
-        "description": "Update the maximum hourly energy limit, operation mode, and conservative target strategy settings.\n\nThe conservative target strategy keeps consumption below the limit early in the hour, then jumps to 100% in the final minutes window to reduce the risk of overshooting.",
+        "description": "Update the hourly set point and operation mode. RVik Razor projects load states to the end of the hour and regulates only when a change improves accuracy.",
         "data": {
-          "max_hour_kwh": "Maximum kWh per hour",
-          "mode": "Operation mode",
-          "base_target_fraction": "Early hour target fraction (e.g., 0.75 = 75%)",
-          "ramp_start_minutes": "Final jump window (minutes before end of hour)"
+          "max_hour_kwh": "Hourly set point (kWh)",
+          "mode": "Operation mode"
         }
       }
     }
@@ -102,13 +100,13 @@
       "projected_end_hour_kwh": {
         "name": "Projected end hour kWh"
       },
-      "needed_reduction_kw": {
-        "name": "Needed reduction"
+      "projection_error_kwh": {
+        "name": "Projection error"
       }
     },
     "number": {
       "max_hour_kwh": {
-        "name": "Max hour kWh"
+        "name": "Hourly set point"
       }
     },
     "select": {

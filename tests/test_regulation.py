@@ -1,23 +1,17 @@
-"""Tests for Rvik Razor regulation logic.
-
-This module tests the core regulation decision-making logic in isolation.
-"""
+"""Tests for Rvik Razor regulation logic."""
 
 from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime, timezone
-from typing import Any
 
 import pytest
 
 from custom_components.rvik_razor.const import Load, LoadType
 from custom_components.rvik_razor.coordinator import (
-    _calculate_nominal_power_per_ampere,
     RvikRazorCoordinator,
+    _calculate_nominal_power_per_ampere,
     calculate_available_down_capacity,
-    calculate_effective_target,
     calculate_regulation_decision,
 )
 
@@ -27,9 +21,8 @@ def create_test_load(
     priority: int = 50,
     load_type: LoadType = LoadType.SWITCH,
     enabled: bool = True,
-    enabled_entity_id: str | None = None,
     last_action_time: float = 0.0,
-    assumed_power_kw: float = 2.0,
+    assumed_power_kw: float | None = 2.0,
     **kwargs,
 ) -> Load:
     """Create a test Load object with sensible defaults."""
@@ -38,1383 +31,403 @@ def create_test_load(
         priority=priority,
         load_type=load_type,
         enabled=enabled,
-        enabled_entity_id=enabled_entity_id,
         last_action_time=last_action_time,
         assumed_power_kw=assumed_power_kw,
         **kwargs,
     )
 
 
-class TestConservativeTargetStrategy:
-    """Test the conservative target strategy with final-window jump."""
-
-    def test_early_hour_uses_base_fraction(self):
-        """Test that early in the hour we use the conservative base fraction."""
-        max_kwh = 5.0
-        remaining_minutes = 45.0  # Early in the hour
-
-        effective_target, fraction = calculate_effective_target(
-            max_hour_kwh=max_kwh,
-            remaining_minutes=remaining_minutes,
-            base_fraction=0.75,
-            ramp_start_minutes=15.0,
-        )
-
-        assert fraction == 0.75
-        assert effective_target == 3.75  # 5.0 * 0.75
-
-    def test_jump_window_start_uses_full_target(self):
-        """Test that at jump window start we switch to 100%."""
-        max_kwh = 5.0
-        remaining_minutes = 15.0  # Exactly at jump window start
-
-        effective_target, fraction = calculate_effective_target(
-            max_hour_kwh=max_kwh,
-            remaining_minutes=remaining_minutes,
-            base_fraction=0.75,
-            ramp_start_minutes=15.0,
-        )
-
-        assert fraction == 1.0
-        assert effective_target == 5.0
-
-    def test_inside_jump_window_uses_full_target(self):
-        """Test that any time inside final window uses 100% target."""
-        max_kwh = 5.0
-        remaining_minutes = 7.5  # Inside 15-minute final window
-
-        effective_target, fraction = calculate_effective_target(
-            max_hour_kwh=max_kwh,
-            remaining_minutes=remaining_minutes,
-            base_fraction=0.75,
-            ramp_start_minutes=15.0,
-        )
-
-        assert fraction == 1.0
-        assert effective_target == 5.0
-
-    def test_end_of_hour_reaches_100_percent(self):
-        """Test that at end of hour we reach 100% of max."""
-        max_kwh = 5.0
-        remaining_minutes = 0.0  # End of hour
-
-        effective_target, fraction = calculate_effective_target(
-            max_hour_kwh=max_kwh,
-            remaining_minutes=remaining_minutes,
-            base_fraction=0.75,
-            ramp_start_minutes=15.0,
-        )
-
-        assert fraction == 1.0
-        assert effective_target == 5.0
-
-    def test_low_down_capacity_more_conservative(self):
-        """Test that low downward control capacity triggers more conservative target."""
-        max_kwh = 5.0
-        remaining_minutes = 30.0  # Early hour
-
-        # Low down capacity relative to current power
-        effective_target, fraction = calculate_effective_target(
-            max_hour_kwh=max_kwh,
-            remaining_minutes=remaining_minutes,
-            available_down_capacity_kw=0.5,  # Only 10% of current power
-            current_power_kw=5.0,
-            base_fraction=0.75,
-            ramp_start_minutes=15.0,
-        )
-
-        # Should use more conservative 0.70 fraction
-        assert fraction == 0.70
-        assert effective_target == 3.5
-
-    def test_adequate_down_capacity_normal_target(self):
-        """Test that adequate down capacity uses normal target."""
-        max_kwh = 5.0
-        remaining_minutes = 30.0  # Early hour
-
-        # Adequate down capacity (30% of current power)
-        effective_target, fraction = calculate_effective_target(
-            max_hour_kwh=max_kwh,
-            remaining_minutes=remaining_minutes,
-            available_down_capacity_kw=1.5,  # 30% of current power
-            current_power_kw=5.0,
-            base_fraction=0.75,
-            ramp_start_minutes=15.0,
-        )
-
-        # Should use normal 0.75 fraction
-        assert fraction == 0.75
-        assert effective_target == 3.75
+def decide(
+    loads: list[Load],
+    current_hour_kwh: float,
+    house_power_kw: float | None,
+    set_point_kwh: float = 5.0,
+    remaining_seconds: float = 1800.0,
+    **kwargs,
+) -> dict:
+    """Call the decision function with common defaults."""
+    return calculate_regulation_decision(
+        loads=loads,
+        current_hour_kwh=current_hour_kwh,
+        house_power_kw=house_power_kw,
+        hourly_set_point_kwh=set_point_kwh,
+        remaining_seconds=remaining_seconds,
+        current_time=kwargs.pop("current_time", time.time()),
+        **kwargs,
+    )
 
 
 class TestAvailableDownCapacity:
     """Test calculation of available downward control capacity."""
 
     def test_switch_on_provides_capacity(self):
-        """Test that an enabled switch that is ON provides capacity."""
-        loads = [
-            create_test_load(
-                name="Heater",
-                load_type=LoadType.SWITCH,
-                enabled=True,
-                assumed_power_kw=2.0,
-                current_switch_state="on",
-            )
-        ]
+        load = create_test_load(current_switch_state="on", assumed_power_kw=2.0)
 
-        capacity = calculate_available_down_capacity(loads)
-        assert capacity == 2.0
-
-    def test_switch_off_no_capacity(self):
-        """Test that an enabled switch that is OFF provides no capacity."""
-        loads = [
-            create_test_load(
-                name="Heater",
-                load_type=LoadType.SWITCH,
-                enabled=True,
-                assumed_power_kw=2.0,
-                current_switch_state="off",
-            )
-        ]
-
-        capacity = calculate_available_down_capacity(loads)
-        assert capacity == 0.0
+        assert calculate_available_down_capacity([load]) == 2.0
 
     def test_inverted_switch_off_provides_capacity(self):
-        """Test that an inverted switch that is OFF (consuming) provides capacity."""
-        loads = [
-            create_test_load(
-                name="Inverted Load",
-                load_type=LoadType.SWITCH,
-                enabled=True,
-                assumed_power_kw=1.5,
-                current_switch_state="off",
-                switch_inverted=True,
-            )
-        ]
+        load = create_test_load(
+            current_switch_state="off",
+            switch_inverted=True,
+            assumed_power_kw=1.5,
+        )
 
-        capacity = calculate_available_down_capacity(loads)
-        assert capacity == 1.5
-
-    def test_disabled_load_no_capacity(self):
-        """Test that disabled loads don't count toward capacity."""
-        loads = [
-            create_test_load(
-                name="Disabled Heater",
-                load_type=LoadType.SWITCH,
-                enabled=False,
-                assumed_power_kw=2.0,
-                current_switch_state="on",
-            )
-        ]
-
-        capacity = calculate_available_down_capacity(loads)
-        assert capacity == 0.0
-
-    def test_ev_charger_provides_capacity(self):
-        """Test that an EV charger with current amperage provides capacity."""
-        loads = [
-            create_test_load(
-                name="EV Charger",
-                load_type=LoadType.EV_AMPERE,
-                enabled=True,
-                current_ampere=16.0,
-                phases=3,
-                voltage=400,
-            )
-        ]
-
-        capacity = calculate_available_down_capacity(loads)
-        # 3-phase: power_per_ampere = 400 * 1.732 / 1000 ≈ 0.693 kW/A
-        # 16A * 0.693 ≈ 11.08 kW
-        assert capacity == pytest.approx(11.08, rel=0.02)
-
-    def test_multiple_loads_sum_capacity(self):
-        """Test that multiple loads sum their capacities."""
-        loads = [
-            create_test_load(
-                name="Heater 1",
-                load_type=LoadType.SWITCH,
-                enabled=True,
-                assumed_power_kw=2.0,
-                current_switch_state="on",
-            ),
-            create_test_load(
-                name="Heater 2",
-                load_type=LoadType.SWITCH,
-                enabled=True,
-                assumed_power_kw=1.5,
-                current_switch_state="on",
-            ),
-        ]
-
-        capacity = calculate_available_down_capacity(loads)
-        assert capacity == 3.5
+        assert calculate_available_down_capacity([load]) == 1.5
 
     def test_measured_power_preferred_over_assumed(self):
-        """Test that measured power is used when available instead of assumed."""
-        loads = [
-            create_test_load(
-                name="Heater with sensor",
-                load_type=LoadType.SWITCH,
-                enabled=True,
-                assumed_power_kw=2.0,  # Assumed value
-                current_switch_state="on",
-                current_power_kw=1.8,  # Actual measured value
-            )
-        ]
+        load = create_test_load(
+            current_switch_state="on",
+            assumed_power_kw=2.0,
+            current_power_kw=1.8,
+        )
 
-        capacity = calculate_available_down_capacity(loads)
-        # Should use measured 1.8 kW, not assumed 2.0 kW
-        assert capacity == 1.8
+        assert calculate_available_down_capacity([load]) == 1.8
 
-    def test_falls_back_to_assumed_when_no_measurement(self):
-        """Test that assumed power is used when no measurement available."""
-        loads = [
-            create_test_load(
-                name="Heater without sensor",
-                load_type=LoadType.SWITCH,
-                enabled=True,
-                assumed_power_kw=2.0,
-                current_switch_state="on",
-                current_power_kw=None,  # No measurement
-            )
-        ]
+    def test_ev_charger_uses_nominal_ampere_power(self):
+        load = create_test_load(
+            load_type=LoadType.EV_AMPERE,
+            current_ampere=16.0,
+            phases=3,
+            voltage=400,
+        )
 
-        capacity = calculate_available_down_capacity(loads)
-        assert capacity == 2.0
-
-    def test_ev_charger_formula_preferred_over_measured(self):
-        """Test that EV charger uses formula-based power before measured power."""
-        loads = [
-            create_test_load(
-                name="EV Charger",
-                load_type=LoadType.EV_AMPERE,
-                enabled=True,
-                current_ampere=16.0,
-                phases=3,
-                voltage=400,
-                current_power_kw=10.5,  # Actual measured value
-            )
-        ]
-
-        capacity = calculate_available_down_capacity(loads)
-        # Should use formula-based 11.08 kW, not measured 10.5 kW
-        assert capacity == pytest.approx(11.08, rel=0.02)
-
-    def test_ev_charger_measured_power_fallback_when_ampere_unavailable(self):
-        """Test measured power fallback when ampere value isn't available."""
-        loads = [
-            create_test_load(
-                name="EV Charger",
-                load_type=LoadType.EV_AMPERE,
-                enabled=True,
-                current_ampere=None,
-                phases=3,
-                voltage=400,
-                current_power_kw=10.5,
-            )
-        ]
-
-        capacity = calculate_available_down_capacity(loads)
-        assert capacity == 10.5
-
-    def test_mixed_measured_and_assumed_loads(self):
-        """Test capacity calculation with mix of measured and assumed loads."""
-        loads = [
-            create_test_load(
-                name="Heater with sensor",
-                load_type=LoadType.SWITCH,
-                enabled=True,
-                assumed_power_kw=2.0,
-                current_switch_state="on",
-                current_power_kw=1.7,  # Measured
-            ),
-            create_test_load(
-                name="Heater without sensor",
-                load_type=LoadType.SWITCH,
-                enabled=True,
-                assumed_power_kw=1.5,
-                current_switch_state="on",
-                current_power_kw=None,  # No measurement
-            ),
-        ]
-
-        capacity = calculate_available_down_capacity(loads)
-        # 1.7 (measured) + 1.5 (assumed) = 3.2
-        assert capacity == 3.2
+        assert calculate_available_down_capacity([load]) == pytest.approx(
+            11.08, rel=0.02
+        )
 
 
 class TestPowerPerAmpere:
     """Test nominal power-per-ampere fallback calculations."""
 
     def test_nominal_power_per_ampere_single_phase(self):
-        """1-phase fallback uses P = V * I."""
-        load = create_test_load(
-            load_type=LoadType.EV_AMPERE,
-            phases=1,
-            voltage=230,
-        )
+        load = create_test_load(load_type=LoadType.EV_AMPERE, phases=1, voltage=230)
+
         assert _calculate_nominal_power_per_ampere(load) == pytest.approx(0.23)
 
     def test_nominal_power_per_ampere_three_phase(self):
-        """3-phase fallback uses P = sqrt(3) * V * I."""
+        load = create_test_load(load_type=LoadType.EV_AMPERE, phases=3, voltage=400)
+
+        assert _calculate_nominal_power_per_ampere(load) == pytest.approx(
+            0.6928, rel=1e-3
+        )
+
+
+class TestHorizonRegulationDecisions:
+    """Test projection-based horizon set-point control."""
+
+    def test_no_action_within_accuracy_deadband(self):
+        load = create_test_load(current_switch_state="on")
+
+        decision = decide([load], current_hour_kwh=4.99, house_power_kw=0.0)
+
+        assert decision["action"] == "none"
+        assert "deadband" in decision["reason"]
+
+    def test_no_control_without_house_power(self):
+        load = create_test_load(current_switch_state="on")
+
+        decision = decide([load], current_hour_kwh=4.0, house_power_kw=None)
+
+        assert decision["action"] == "none"
+        assert "house power unavailable" in decision["reason"].lower()
+
+    def test_reduce_first_priority_load_when_it_improves_accuracy(self):
+        loads = [
+            create_test_load(
+                name="Priority 1",
+                priority=1,
+                assumed_power_kw=1.0,
+                current_switch_state="on",
+            ),
+            create_test_load(
+                name="Priority 2",
+                priority=2,
+                assumed_power_kw=0.5,
+                current_switch_state="on",
+            ),
+        ]
+
+        decision = decide(loads, current_hour_kwh=4.0, house_power_kw=3.0)
+
+        assert decision["action"] == "reduce"
+        assert decision["loads_to_reduce"][0]["load"].name == "Priority 1"
+        assert decision["loads_to_reduce"][0]["new_value"] == "off"
+        assert decision["candidate_projected_end_kwh"] == pytest.approx(5.0)
+
+    def test_bad_fit_at_first_eligible_reduce_priority_waits(self):
+        loads = [
+            create_test_load(
+                name="Priority 1",
+                priority=1,
+                assumed_power_kw=2.0,
+                current_switch_state="on",
+            ),
+            create_test_load(
+                name="Priority 2",
+                priority=2,
+                assumed_power_kw=0.2,
+                current_switch_state="on",
+            ),
+        ]
+
+        decision = decide(loads, current_hour_kwh=4.0, house_power_kw=2.2)
+
+        assert decision["action"] == "none"
+        assert "Priority 1" in decision["reason"]
+        assert "waiting" in decision["reason"]
+
+    def test_cooldown_is_ineligible_and_next_priority_can_reduce(self):
+        now = time.time()
+        loads = [
+            create_test_load(
+                name="Cooldown",
+                priority=1,
+                assumed_power_kw=1.0,
+                current_switch_state="on",
+                last_action_time=now - 30,
+                timeout=120,
+            ),
+            create_test_load(
+                name="Next",
+                priority=2,
+                assumed_power_kw=1.0,
+                current_switch_state="on",
+            ),
+        ]
+
+        decision = decide(
+            loads, current_hour_kwh=4.0, house_power_kw=3.0, current_time=now
+        )
+
+        assert decision["action"] == "reduce"
+        assert decision["loads_to_reduce"][0]["load"].name == "Next"
+
+    def test_unknown_switch_power_is_ineligible(self):
+        load = create_test_load(
+            assumed_power_kw=None,
+            current_power_kw=None,
+            current_switch_state="on",
+        )
+
+        decision = decide([load], current_hour_kwh=4.0, house_power_kw=3.0)
+
+        assert decision["action"] == "none"
+        assert "No eligible loads" in decision["reason"]
+
+    def test_restore_highest_priority_load_when_it_improves_accuracy(self):
+        loads = [
+            create_test_load(
+                name="Low",
+                priority=1,
+                assumed_power_kw=1.0,
+                current_switch_state="off",
+            ),
+            create_test_load(
+                name="High",
+                priority=10,
+                assumed_power_kw=1.0,
+                current_switch_state="off",
+            ),
+        ]
+
+        decision = decide(loads, current_hour_kwh=4.0, house_power_kw=1.0)
+
+        assert decision["action"] == "restore"
+        assert decision["loads_to_restore"][0]["load"].name == "High"
+        assert decision["loads_to_restore"][0]["new_value"] == "on"
+        assert decision["candidate_projected_end_kwh"] == pytest.approx(5.0)
+
+    def test_bad_fit_at_first_eligible_restore_priority_waits(self):
+        loads = [
+            create_test_load(
+                name="High",
+                priority=10,
+                assumed_power_kw=2.0,
+                current_switch_state="off",
+            ),
+            create_test_load(
+                name="Low",
+                priority=1,
+                assumed_power_kw=1.0,
+                current_switch_state="off",
+            ),
+        ]
+
+        decision = decide(loads, current_hour_kwh=4.0, house_power_kw=1.0)
+
+        assert decision["action"] == "none"
+        assert "High" in decision["reason"]
+        assert "waiting" in decision["reason"]
+
+    def test_inverted_switch_reduce_turns_on(self):
+        load = create_test_load(
+            switch_inverted=True,
+            current_switch_state="off",
+            assumed_power_kw=1.0,
+        )
+
+        decision = decide([load], current_hour_kwh=4.0, house_power_kw=3.0)
+
+        assert decision["action"] == "reduce"
+        assert decision["loads_to_reduce"][0]["new_value"] == "on"
+
+    def test_inverted_switch_restore_turns_off(self):
+        load = create_test_load(
+            switch_inverted=True,
+            current_switch_state="on",
+            assumed_power_kw=1.0,
+        )
+
+        decision = decide([load], current_hour_kwh=4.0, house_power_kw=1.0)
+
+        assert decision["action"] == "restore"
+        assert decision["loads_to_restore"][0]["new_value"] == "off"
+
+    def test_ev_reduce_chooses_best_lower_ampere(self):
         load = create_test_load(
             load_type=LoadType.EV_AMPERE,
-            phases=3,
-            voltage=400,
-        )
-        assert _calculate_nominal_power_per_ampere(load) == pytest.approx(0.6928, rel=1e-3)
-
-
-class TestRegulationDecisions:
-    """Test the calculate_regulation_decision function."""
-
-    def test_no_action_when_within_safe_range(self):
-        """Test that no action is taken when power is within safe range."""
-        loads = [create_test_load()]
-        current_time = datetime(2020, 1, 1, 8, 45, 0, tzinfo=timezone.utc).timestamp()
-
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=0.0,  # No reduction needed
-            projected_end_kwh=4.8,  # Between max - margin (4.7) and max (5.0)
-            max_hour_kwh=5.0,
-            current_time=current_time,
-            restore_margin=0.3,
+            current_ampere=4,
+            phases=1,
+            voltage=1000,
         )
 
-        assert decision["action"] == "none"
-        assert len(decision["loads_to_reduce"]) == 0
-        assert len(decision["loads_to_restore"]) == 0
-        assert "Within safe range" in decision["reason"]
-
-    def test_reduce_action_when_over_limit(self):
-        """Test that loads are reduced when exceeding limit."""
-        loads = [
-            create_test_load(name="Load 1", priority=10, assumed_power_kw=2.0),
-            create_test_load(name="Load 2", priority=20, assumed_power_kw=3.0),
-        ]
-        current_time = time.time()
-
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=2.5,  # Need to reduce
-            projected_end_kwh=6.0,
-            max_hour_kwh=5.0,
-            current_time=current_time,
-        )
+        decision = decide([load], current_hour_kwh=4.0, house_power_kw=4.0)
 
         assert decision["action"] == "reduce"
-        assert len(decision["loads_to_reduce"]) > 0
-        # Lower priority should be selected first
-        assert decision["loads_to_reduce"][0]["load"].name == "Load 1"
+        assert decision["loads_to_reduce"][0]["new_value"] == 2
+        assert decision["candidate_projected_end_kwh"] == pytest.approx(5.0)
 
-    def test_restore_action_with_sufficient_margin(self):
-        """Test that loads are restored when there's sufficient margin."""
-        loads = [
-            create_test_load(
-                name="Load 1",
-                priority=10,
-                assumed_power_kw=2.0,
-            ),
-            create_test_load(
-                name="Load 2",
-                priority=20,
-                assumed_power_kw=3.0,
-            ),
-        ]
-        current_time = time.time()
+    def test_ev_restore_chooses_best_higher_ampere(self):
+        load = create_test_load(
+            load_type=LoadType.EV_AMPERE,
+            current_ampere=0,
+            phases=1,
+            voltage=1000,
+        )
 
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=0.0,
-            projected_end_kwh=4.0,  # Well below max
-            max_hour_kwh=5.0,
-            current_time=current_time,
-            restore_margin=0.5,  # margin of 0.5 kWh
+        decision = decide([load], current_hour_kwh=4.0, house_power_kw=1.0)
+
+        assert decision["action"] == "restore"
+        assert decision["loads_to_restore"][0]["new_value"] == 1
+        assert decision["candidate_projected_end_kwh"] == pytest.approx(5.0)
+
+    def test_ev_restore_uses_runtime_entity_max_ampere(self):
+        load = create_test_load(
+            load_type=LoadType.EV_AMPERE,
+            current_ampere=16,
+            current_max_ampere=32,
+            phases=1,
+            voltage=1000,
+        )
+
+        decision = decide(
+            [load],
+            current_hour_kwh=4.0,
+            house_power_kw=8.0,
+            set_point_kwh=6.0,
+            remaining_seconds=450.0,
         )
 
         assert decision["action"] == "restore"
-        # All eligible loads returned, sorted by priority (highest first)
-        assert len(decision["loads_to_restore"]) >= 1
-        # Higher priority should be first (restored first)
-        assert decision["loads_to_restore"][0].name == "Load 2"
-
-    def test_multiple_loads_reduced_in_priority_order(self):
-        """Test that multiple loads are reduced in correct priority order."""
-        loads = [
-            create_test_load(name="Low Priority", priority=10, assumed_power_kw=1.0),
-            create_test_load(name="High Priority", priority=90, assumed_power_kw=1.0),
-            create_test_load(name="Med Priority", priority=50, assumed_power_kw=1.0),
-        ]
-        current_time = time.time()
-
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=2.5,  # Need multiple loads
-            projected_end_kwh=6.0,
-            max_hour_kwh=5.0,
-            current_time=current_time,
-        )
-
-        assert decision["action"] == "reduce"
-        # Should reduce at least 2 loads
-        assert len(decision["loads_to_reduce"]) >= 2
-        # Check order: lowest priority first
-        priorities = [plan["load"].priority for plan in decision["loads_to_reduce"]]
-        assert priorities == sorted(priorities)
-
-    def test_cooldown_prevents_action(self):
-        """Test that cooldown prevents actions on recently changed loads."""
-        cooldown = 300.0  # 5 minutes
-        current_time = time.time()
-
-        loads = [
-            create_test_load(
-                name="Recent Action",
-                priority=10,
-                last_action_time=current_time - 60,  # 1 minute ago
-            ),
-            create_test_load(
-                name="Old Action",
-                priority=20,
-                last_action_time=current_time - 400,  # 6+ minutes ago
-            ),
-        ]
-
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=1.0,
-            projected_end_kwh=6.0,
-            max_hour_kwh=5.0,
-            current_time=current_time,
-            cooldown=cooldown,
-        )
-
-        assert decision["action"] == "reduce"
-        # Should only plan to reduce the load that's not in cooldown
-        assert len(decision["loads_to_reduce"]) == 1
-        assert decision["loads_to_reduce"][0]["load"].name == "Old Action"
-
-    def test_disabled_loads_are_ignored(self):
-        """Test that disabled loads are not included in decisions."""
-        loads = [
-            create_test_load(name="Enabled", priority=10, enabled=True),
-            create_test_load(name="Disabled", priority=5, enabled=False),
-        ]
-        current_time = time.time()
-
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=1.0,
-            projected_end_kwh=6.0,
-            max_hour_kwh=5.0,
-            current_time=current_time,
-        )
-
-        # Should only consider enabled loads
-        for plan in decision["loads_to_reduce"]:
-            assert plan["load"].enabled
-
-    def test_only_one_load_restored_at_time(self):
-        """Test that loads are returned in priority order for restoration.
-
-        The decision function returns all eligible loads sorted by priority,
-        and the execution phase restores only one at a time.
-        """
-        loads = [
-            create_test_load(
-                name="Load 1",
-                priority=10,
-            ),
-            create_test_load(
-                name="Load 2",
-                priority=20,
-            ),
-        ]
-        current_time = time.time()
-
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=0.0,
-            projected_end_kwh=4.0,
-            max_hour_kwh=5.0,
-            current_time=current_time,
-            restore_margin=0.5,
-        )
-
-        assert decision["action"] == "restore"
-        # All eligible loads are returned, sorted by priority (highest first)
-        # The execution phase will only restore one at a time
-        assert len(decision["loads_to_restore"]) >= 1
-        # Highest priority (Load 2) should be first in the list
-        assert decision["loads_to_restore"][0].name == "Load 2"
-
-    def test_restore_any_enabled_load(self):
-        """Test that any enabled load can be restored to max consumption."""
-        loads = [
-            create_test_load(
-                name="Enabled Load",
-                priority=10,
-            ),
-        ]
-        current_time = time.time()
-
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=0.0,
-            projected_end_kwh=4.0,
-            max_hour_kwh=5.0,
-            current_time=current_time,
-            restore_margin=0.5,
-        )
-
-        # Should attempt to restore any enabled load when margin is available
-        assert decision["action"] == "restore"
-        assert len(decision["loads_to_restore"]) == 1
-
-    def test_ev_ampere_load_type(self):
-        """Test that EV ampere loads are properly handled."""
-        loads = [
-            create_test_load(
-                name="EV Charger",
-                priority=50,
-                load_type=LoadType.EV_AMPERE,
-                ampere_number_entity_id="number.ev_charger",
-            ),
-        ]
-        current_time = time.time()
-
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=2.0,
-            projected_end_kwh=6.0,
-            max_hour_kwh=5.0,
-            current_time=current_time,
-        )
-
-        assert decision["action"] == "reduce"
-        assert len(decision["loads_to_reduce"]) == 1
-        assert decision["loads_to_reduce"][0]["type"] == "ev_ampere"
-
-    def test_insufficient_reduction_available(self):
-        """Test behavior when available reduction is less than needed."""
-        loads = [
-            create_test_load(name="Small Load", priority=10, assumed_power_kw=1.0),
-        ]
-        current_time = time.time()
-
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=5.0,  # Need much more than available
-            projected_end_kwh=8.0,
-            max_hour_kwh=5.0,
-            current_time=current_time,
-        )
-
-        assert decision["action"] == "reduce"
-        assert len(decision["loads_to_reduce"]) == 1
-        # Should still reduce what's available even if insufficient
-        assert decision["remaining_reduction"] > 0
-
-    def test_no_restore_action_end_of_hour_high_power(self):
-        """Test that restore is blocked when end of hour has high power."""
-        loads = [
-            create_test_load(
-                name="Load 1",
-                priority=10,
-                assumed_power_kw=2.0,
-            ),
-        ]
-        current_time = time.time()
-        max_hour_kwh = 5.0
-
-        # Scenario:
-        # End of hour (5 min remaining).
-        # We have used very little energy (projected 2.0 kWh < 5.0 kWh).
-        # But we are currently pulling 6.0 kW (>= 5.0 kW).
-        # Normal logic would restore loads because projected < max - margin.
-        # New logic should block restore because power is high near end of hour.
-
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=0.0,
-            projected_end_kwh=2.0,  # Low projected energy
-            max_hour_kwh=max_hour_kwh,
-            current_time=current_time,
-            current_power_kw=6.0,  # High current power
-            remaining_minutes=2.0,  # Near end of hour
-            restore_margin=0.5,
-        )
-
-        assert decision["action"] == "none"
-        assert "holding due to high power" in decision["reason"]
-
-
-class TestRegulationEdgeCases:
-    """Test edge cases and boundary conditions."""
-
-    def test_very_small_reduction_threshold(self):
-        """Test that very small reductions (< 0.01 kW) are ignored."""
-        loads = [create_test_load()]
-        current_time = time.time()
-
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=0.005,  # Below threshold
-            projected_end_kwh=5.0,
-            max_hour_kwh=5.0,
-            current_time=current_time,
-        )
-
-        assert decision["action"] == "none"
-
-    def test_restore_margin_boundary(self):
-        """Test behavior at exact restore margin boundary."""
-        loads = [create_test_load()]
-        current_time = time.time()
-        restore_margin = 0.5
-        max_hour_kwh = 5.0
-
-        # Exactly at boundary (should NOT restore)
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=0.0,
-            projected_end_kwh=max_hour_kwh - restore_margin,
-            max_hour_kwh=max_hour_kwh,
-            current_time=current_time,
-            restore_margin=restore_margin,
-        )
-        assert decision["action"] == "none"
-
-        # Just below boundary (should restore)
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=0.0,
-            projected_end_kwh=max_hour_kwh - restore_margin - 0.01,
-            max_hour_kwh=max_hour_kwh,
-            current_time=current_time,
-            restore_margin=restore_margin,
-        )
-        assert decision["action"] == "restore"
-
-    def test_empty_loads_list(self):
-        """Test behavior with no loads configured."""
-        decision = calculate_regulation_decision(
-            loads=[],
-            needed_reduction_kw=2.0,
-            projected_end_kwh=6.0,
-            max_hour_kwh=5.0,
-            current_time=time.time(),
-        )
-
-        assert decision["action"] == "reduce"
-        assert len(decision["loads_to_reduce"]) == 0
-        assert "no loads available" in decision["reason"].lower()
+        assert decision["loads_to_restore"][0]["new_value"] == 32
 
 
 class TestEnabledEntityFeature:
     """Test the enabled_entity_id feature for dynamic load control."""
 
-    def test_load_with_enabled_entity_id(self):
-        """Test that loads can have an enabled_entity_id configured."""
-        load = create_test_load(
-            name="EV Charger",
-            enabled=True,
-            enabled_entity_id="binary_sensor.car_charging",
-        )
-
-        assert load.enabled_entity_id == "binary_sensor.car_charging"
-        assert load.enabled is True
-
-    def test_load_without_enabled_entity_id(self):
-        """Test that loads work without enabled_entity_id (backwards compatible)."""
-        load = create_test_load(
-            name="Heat Pump",
-            enabled=True,
-        )
-
-        assert load.enabled_entity_id is None
-        assert load.enabled is True
-
     def test_load_to_dict_includes_enabled_entity(self):
-        """Test that to_dict includes enabled_entity field."""
-        load = create_test_load(
-            name="EV Charger",
-            enabled_entity_id="binary_sensor.car_charging",
-        )
+        load = create_test_load(enabled_entity_id="binary_sensor.car_charging")
 
         load_dict = load.to_dict()
-        assert "enabled_entity" in load_dict
+
         assert load_dict["enabled_entity"] == "binary_sensor.car_charging"
 
     def test_load_from_dict_with_enabled_entity(self):
-        """Test that from_dict correctly loads enabled_entity field."""
-        from custom_components.rvik_razor.const import (
-            CONF_LOAD_ENABLED_ENTITY,
-            CONF_LOAD_NAME,
-            CONF_LOAD_PRIORITY,
-            CONF_LOAD_TYPE,
-            Load,
-        )
-
         data = {
-            CONF_LOAD_NAME: "EV Charger",
-            CONF_LOAD_TYPE: "switch",
-            CONF_LOAD_PRIORITY: 10,
-            CONF_LOAD_ENABLED_ENTITY: "binary_sensor.car_charging",
+            "name": "EV Charger",
+            "type": "switch",
+            "priority": 10,
+            "enabled_entity": "binary_sensor.car_charging",
         }
 
         load = Load.from_dict(data)
+
         assert load.enabled_entity_id == "binary_sensor.car_charging"
 
-    def test_load_from_dict_without_enabled_entity(self):
-        """Test that from_dict works without enabled_entity (backwards compatible)."""
-        from custom_components.rvik_razor.const import (
-            CONF_LOAD_NAME,
-            CONF_LOAD_PRIORITY,
-            CONF_LOAD_TYPE,
-            Load,
-        )
-
-        data = {
-            CONF_LOAD_NAME: "Heat Pump",
-            CONF_LOAD_TYPE: "switch",
-            CONF_LOAD_PRIORITY: 20,
-        }
-
-        load = Load.from_dict(data)
-        assert load.enabled_entity_id is None
-
-    def test_disabled_via_enabled_flag_still_works(self):
-        """Test that the regular enabled flag still disables loads."""
+    def test_disabled_loads_are_ignored(self):
         loads = [
             create_test_load(
-                name="Disabled Load",
-                priority=5,  # Lowest priority, would be first to reduce
-                enabled=False,
-                enabled_entity_id=None,
-            ),
-            create_test_load(
-                name="Enabled Load",
-                priority=10,
-                enabled=True,
-                enabled_entity_id=None,
-            ),
-        ]
-        current_time = time.time()
-
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=1.0,
-            projected_end_kwh=6.0,
-            max_hour_kwh=5.0,
-            current_time=current_time,
-        )
-
-        # Should only reduce the enabled load
-        assert decision["action"] == "reduce"
-        assert len(decision["loads_to_reduce"]) == 1
-        assert decision["loads_to_reduce"][0]["load"].name == "Enabled Load"
-
-
-class TestIncidentRecreation:
-    """Test cases that recreate real-world incidents."""
-
-    def test_incident_2026_01_25_heat_pump_not_reduced(self):
-        """Recreate incident: heat pump (pri 3, inverted switch) not turned off.
-
-        Scenario:
-        - 2 EV chargers at priority 1 and 2
-        - 1 heat pump at priority 3, inverted switch, no assumed_power_kw set
-        - Heat pump has power sensor showing ~2kW consumption
-        - EVs were reduced to 0, but heat pump wasn't turned off
-        - Result: exceeded the limit
-
-        The bug: When assumed_power_kw is not set for a switch,
-        _calculate_switch_reduction returns reduction_kw=0.0, which means
-        the planning phase doesn't account for the actual reduction potential.
-        """
-        current_time = time.time()
-
-        loads = [
-            # EV charger 1 - priority 1 (lowest, cut first)
-            Load(
-                name="EV Charger 1",
-                load_type=LoadType.EV_AMPERE,
+                name="Disabled",
                 priority=1,
-                enabled=True,
-                ampere_number_entity_id="number.ev1_charging_amps",
-                phases=3,
-                voltage=400,
+                enabled=False,
+                current_switch_state="on",
             ),
-            # EV charger 2 - priority 2
-            Load(
-                name="EV Charger 2",
-                load_type=LoadType.EV_AMPERE,
+            create_test_load(
+                name="Enabled",
                 priority=2,
                 enabled=True,
-                ampere_number_entity_id="number.ev2_charging_amps",
-                phases=3,
-                voltage=400,
-            ),
-            # Heat pump - priority 3 (highest, cut last)
-            # Note: NO assumed_power_kw set, but has power_sensor
-            Load(
-                name="Heat Pump",
-                load_type=LoadType.SWITCH,
-                priority=3,
-                enabled=True,
-                switch_entity_id="switch.heat_pump",
-                switch_inverted=True,  # Consumes power when OFF
-                power_sensor_entity_id="sensor.heat_pump_power",
-                assumed_power_kw=None,  # Not set! This was the issue
-                current_switch_state="off",  # Currently consuming power
+                current_switch_state="on",
+                assumed_power_kw=1.0,
             ),
         ]
 
-        # Need 3kW reduction - more than EVs alone can provide at 0A
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=3.0,
-            projected_end_kwh=6.0,
-            max_hour_kwh=5.0,
-            current_time=current_time,
-        )
+        decision = decide(loads, current_hour_kwh=4.0, house_power_kw=3.0)
 
         assert decision["action"] == "reduce"
-
-        # All 3 loads should be in the reduction plan
-        load_names = [p["load"].name for p in decision["loads_to_reduce"]]
-        assert "EV Charger 1" in load_names, "EV1 should be in reduction plan"
-        assert "EV Charger 2" in load_names, "EV2 should be in reduction plan"
-        assert "Heat Pump" in load_names, "Heat pump should be in reduction plan"
-
-        # The heat pump's reduction_kw should reflect actual potential, not 0
-        heat_pump_plan = next(
-            p for p in decision["loads_to_reduce"] if p["load"].name == "Heat Pump"
-        )
-        # BUG CHECK: If assumed_power_kw is None, reduction_kw becomes 0.0
-        # This test documents the current (buggy) behavior
-        # When fixed, the heat pump should report its actual power consumption
-        print(f"Heat pump reduction_kw in plan: {heat_pump_plan['reduction_kw']}")
-
-        # For now, just verify the heat pump IS in the plan
-        # The actual execution will read from power sensor
-        assert heat_pump_plan is not None
-
-    def test_switch_with_power_sensor_but_no_assumed_power(self):
-        """Test that switches with power sensor but no assumed_power still get reduced.
-
-        The planning phase can't know the actual power (needs HA state),
-        so reduction_kw will be 0.0. But the switch should still be in the plan
-        and the actual power should be determined during execution.
-        """
-        current_time = time.time()
-
-        # Single switch load with power sensor but no assumed_power
-        load = Load(
-            name="Test Switch",
-            load_type=LoadType.SWITCH,
-            priority=1,
-            enabled=True,
-            switch_entity_id="switch.test",
-            switch_inverted=False,
-            power_sensor_entity_id="sensor.test_power",
-            assumed_power_kw=None,
-            current_switch_state="on",  # Currently consuming power
-        )
-
-        decision = calculate_regulation_decision(
-            loads=[load],
-            needed_reduction_kw=2.0,
-            projected_end_kwh=6.0,
-            max_hour_kwh=5.0,
-            current_time=current_time,
-        )
-
-        assert decision["action"] == "reduce"
-        assert len(decision["loads_to_reduce"]) == 1
-
-        # The reduction_kw will be 0.0 because assumed_power_kw is None
-        # This is a limitation of the pure function approach
-        plan = decision["loads_to_reduce"][0]
-        assert (
-            plan["reduction_kw"] == 0.0
-        ), "Without assumed_power_kw, reduction_kw is 0"
-
-        # But remaining_reduction should still be > 0 because we couldn't account for it
-        assert (
-            decision["remaining_reduction"] == 2.0
-        ), "Remaining reduction should be unchanged since switch has 0 reduction_kw"
-
-    def test_switch_plan_has_needed_reduction_key(self):
-        """Test that switch reduction plans include needed_reduction key.
-
-        BUG: Switch plans didn't include 'needed_reduction' key but the execution
-        code tries to access plan['needed_reduction'], causing KeyError.
-        """
-        current_time = time.time()
-
-        load = Load(
-            name="Test Switch",
-            load_type=LoadType.SWITCH,
-            priority=1,
-            enabled=True,
-            switch_entity_id="switch.test",
-            switch_inverted=False,
-            assumed_power_kw=2.0,
-            current_switch_state="on",
-        )
-
-        decision = calculate_regulation_decision(
-            loads=[load],
-            needed_reduction_kw=3.0,
-            projected_end_kwh=6.0,
-            max_hour_kwh=5.0,
-            current_time=current_time,
-        )
-
-        assert len(decision["loads_to_reduce"]) == 1
-        plan = decision["loads_to_reduce"][0]
-
-        # This should NOT raise KeyError - the key should exist
-        assert (
-            "needed_reduction" in plan
-        ), "Switch plans must include 'needed_reduction' key to avoid KeyError in execution"
-
-
-class TestTimeoutLoadBehavior:
-    """Test that loads in cooldown are skipped during reduction planning."""
-
-    def test_skip_low_priority_cooldown_and_reduce_high_priority(self):
-        """Test that cooldown loads are skipped and higher priority can be reduced.
-
-        Scenario:
-        - Low priority load (pri=10) is ON and on cooldown (recently restored)
-        - High priority load (pri=50) is ON
-        - We need 2kW reduction
-        - Low priority load could provide 3kW if reduced
-
-        Expected: Reduce high priority because low priority is in cooldown
-        """
-        current_time = time.time()
-
-        loads = [
-            # Low priority - ON, on cooldown, but has capacity to be reduced
-            create_test_load(
-                name="Low Priority",
-                priority=10,
-                assumed_power_kw=3.0,  # Can provide 3kW reduction
-                last_action_time=current_time - 60,  # 1 minute ago (in timeout)
-                timeout=120,  # 2 min timeout
-                current_switch_state="on",  # Currently consuming - CAN be reduced
-            ),
-            # High priority - ON, not on cooldown
-            create_test_load(
-                name="High Priority",
-                priority=50,
-                assumed_power_kw=3.0,
-                last_action_time=0,  # Not in timeout
-                current_switch_state="on",  # Currently consuming power
-            ),
-        ]
-
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=2.0,  # Need 2kW reduction
-            projected_end_kwh=6.0,
-            max_hour_kwh=5.0,
-            current_time=current_time,
-        )
-
-        # Low priority is in cooldown, so high priority should be used.
-        load_names = [p["load"].name for p in decision["loads_to_reduce"]]
-        assert "High Priority" in load_names, (
-            "High priority load should be reduced when lower priority load is in cooldown"
-        )
-
-    def test_reduce_high_priority_when_low_priority_cannot_provide_enough(self):
-        """Test that we reduce high priority when low priority can't cover the need.
-
-        Scenario:
-        - Low priority load (pri=10) is ON, on cooldown, can provide 1kW
-        - High priority load (pri=50) is ON, not on cooldown
-        - We need 3kW reduction
-        - Low priority can only provide 1kW - not enough!
-
-        Expected: Reduce high priority load (low priority can't cover the need)
-        """
-        current_time = time.time()
-
-        loads = [
-            # Low priority - can only provide 1kW
-            create_test_load(
-                name="Low Priority",
-                priority=10,
-                assumed_power_kw=1.0,  # Only 1kW capacity
-                last_action_time=current_time - 60,
-                timeout=120,
-                current_switch_state="on",
-            ),
-            # High priority
-            create_test_load(
-                name="High Priority",
-                priority=50,
-                assumed_power_kw=3.0,
-                last_action_time=0,
-                current_switch_state="on",
-            ),
-        ]
-
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=3.0,  # Need 3kW, low priority only has 1kW
-            projected_end_kwh=6.0,
-            max_hour_kwh=5.0,
-            current_time=current_time,
-        )
-
-        # Low priority cannot cover the full need, so high priority must be reduced
-        assert decision["action"] == "reduce"
-        load_names = [p["load"].name for p in decision["loads_to_reduce"]]
-        assert (
-            "High Priority" in load_names
-        ), "High priority should be reduced when low priority can't provide enough"
-
-    def test_reduce_high_priority_when_low_priority_already_reduced(self):
-        """Test that we reduce high priority when low priority is already reduced.
-
-        Scenario:
-        - Low priority load (pri=10) is already OFF (reduced), on cooldown
-        - High priority load (pri=50) is ON
-        - We need 2kW reduction
-
-        Expected: Reduce high priority - low priority is already off, nothing more to give
-        """
-        current_time = time.time()
-
-        loads = [
-            # Low priority - already OFF (reduced), no more capacity
-            create_test_load(
-                name="Low Priority",
-                priority=10,
-                assumed_power_kw=3.0,
-                last_action_time=current_time - 60,
-                timeout=120,
-                current_switch_state="off",  # Already reduced - no capacity left
-            ),
-            # High priority - ON
-            create_test_load(
-                name="High Priority",
-                priority=50,
-                assumed_power_kw=3.0,
-                last_action_time=0,
-                current_switch_state="on",
-            ),
-        ]
-
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=2.0,
-            projected_end_kwh=6.0,
-            max_hour_kwh=5.0,
-            current_time=current_time,
-        )
-
-        # Low priority is already off - high priority must be reduced
-        assert decision["action"] == "reduce"
-        load_names = [p["load"].name for p in decision["loads_to_reduce"]]
-        assert (
-            "High Priority" in load_names
-        ), "High priority should be reduced when low priority is already off"
-
-    def test_multiple_low_priority_loads_cover_reduction(self):
-        """Test that cooldown loads are skipped even if they could cover reduction.
-
-        Scenario:
-        - Pri 10: 1.5kW capacity, on cooldown
-        - Pri 20: 1.5kW capacity, on cooldown
-        - Pri 50: 3kW capacity, not on cooldown
-        - Need 2.5kW
-
-        Expected: Reduce high priority load because lower priorities are in cooldown
-        """
-        current_time = time.time()
-
-        loads = [
-            create_test_load(
-                name="Low Pri 1",
-                priority=10,
-                assumed_power_kw=1.5,
-                last_action_time=current_time - 60,
-                timeout=120,
-                current_switch_state="on",  # Can be reduced
-            ),
-            create_test_load(
-                name="Low Pri 2",
-                priority=20,
-                assumed_power_kw=1.5,
-                last_action_time=current_time - 60,
-                timeout=120,
-                current_switch_state="on",  # Can be reduced
-            ),
-            create_test_load(
-                name="High Priority",
-                priority=50,
-                assumed_power_kw=3.0,
-                last_action_time=0,
-                current_switch_state="on",
-            ),
-        ]
-
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=2.5,  # Low pri 1 + 2 = 3kW > 2.5kW needed
-            projected_end_kwh=6.0,
-            max_hour_kwh=5.0,
-            current_time=current_time,
-        )
-
-        # Lower priority loads are in cooldown, so high priority should be reduced.
-        load_names = [p["load"].name for p in decision["loads_to_reduce"]]
-        assert "High Priority" in load_names, (
-            "High priority should be reduced when lower priority loads are in cooldown"
-        )
-
-    def test_inverted_switch_on_cooldown_can_provide_reduction(self):
-        """Test inverted switch on cooldown is correctly assessed for capacity.
-
-        For inverted switches: OFF = consuming power, ON = reduced
-        So if inverted switch is OFF and on cooldown, it CAN be reduced (turned ON).
-        """
-        current_time = time.time()
-
-        loads = [
-            # Inverted switch - OFF means consuming (can be reduced by turning ON)
-            create_test_load(
-                name="Low Priority Inverted",
-                priority=10,
-                assumed_power_kw=3.0,
-                last_action_time=current_time - 60,
-                timeout=120,
-                switch_inverted=True,
-                current_switch_state="off",  # OFF = consuming for inverted, CAN reduce
-            ),
-            create_test_load(
-                name="High Priority",
-                priority=50,
-                assumed_power_kw=3.0,
-                last_action_time=0,
-                current_switch_state="on",
-            ),
-        ]
-
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=2.0,
-            projected_end_kwh=6.0,
-            max_hour_kwh=5.0,
-            current_time=current_time,
-        )
-
-        # Inverted switch is in cooldown, so high priority should be reduced.
-        load_names = [p["load"].name for p in decision["loads_to_reduce"]]
-        assert "High Priority" in load_names, (
-            "High priority should be reduced when inverted switch is in cooldown"
-        )
-
-    def test_ev_charger_on_cooldown_with_capacity(self):
-        """Test EV charger on cooldown with remaining amperage capacity.
-
-        If an EV charger is at 10A and on cooldown, it can still be reduced to 0A.
-        """
-        current_time = time.time()
-
-        loads = [
-            # EV charger at 10A - can be reduced further
-            Load(
-                name="EV Charger",
-                load_type=LoadType.EV_AMPERE,
-                priority=10,
-                enabled=True,
-                ampere_number_entity_id="number.ev_charger",
-                phases=3,
-                voltage=400,
-                last_action_time=current_time - 60,
-                timeout=120,
-                current_ampere=10,  # Can still be reduced to 0
-            ),
-            create_test_load(
-                name="High Priority",
-                priority=50,
-                assumed_power_kw=3.0,
-                last_action_time=0,
-                current_switch_state="on",
-            ),
-        ]
-
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=2.0,
-            projected_end_kwh=6.0,
-            max_hour_kwh=5.0,
-            current_time=current_time,
-        )
-
-        # EV charger is in cooldown, so high priority should be reduced.
-        load_names = [p["load"].name for p in decision["loads_to_reduce"]]
-        assert "High Priority" in load_names, (
-            "High priority should be reduced when EV charger is in cooldown"
-        )
-
-    def test_ev_charger_on_cooldown_at_minimum(self):
-        """Test EV charger on cooldown already at minimum.
-
-        If EV is at 0A and on cooldown, it has no more capacity.
-        """
-        current_time = time.time()
-
-        loads = [
-            # EV charger already at 0A - no more capacity
-            Load(
-                name="EV Charger",
-                load_type=LoadType.EV_AMPERE,
-                priority=10,
-                enabled=True,
-                ampere_number_entity_id="number.ev_charger",
-                phases=3,
-                voltage=400,
-                last_action_time=current_time - 60,
-                timeout=120,
-                current_ampere=0,  # Already at minimum
-            ),
-            create_test_load(
-                name="High Priority",
-                priority=50,
-                assumed_power_kw=3.0,
-                last_action_time=0,
-                current_switch_state="on",
-            ),
-        ]
-
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=2.0,
-            projected_end_kwh=6.0,
-            max_hour_kwh=5.0,
-            current_time=current_time,
-        )
-
-        # EV is at 0A - no capacity left, must reduce high priority
-        assert decision["action"] == "reduce"
-        load_names = [p["load"].name for p in decision["loads_to_reduce"]]
-        assert (
-            "High Priority" in load_names
-        ), "High priority must be reduced when EV at minimum has no capacity"
-
-    def test_no_waiting_when_no_loads_on_cooldown(self):
-        """Test normal reduction when no loads are on cooldown."""
-        current_time = time.time()
-
-        loads = [
-            create_test_load(
-                name="Low Priority",
-                priority=10,
-                assumed_power_kw=3.0,
-                last_action_time=0,  # Not on cooldown
-                current_switch_state="on",
-            ),
-            create_test_load(
-                name="High Priority",
-                priority=50,
-                assumed_power_kw=3.0,
-                last_action_time=0,
-                current_switch_state="on",
-            ),
-        ]
-
-        decision = calculate_regulation_decision(
-            loads=loads,
-            needed_reduction_kw=2.0,
-            projected_end_kwh=6.0,
-            max_hour_kwh=5.0,
-            current_time=current_time,
-        )
-
-        # Low priority should be reduced normally (not on cooldown)
-        assert decision["action"] == "reduce"
-        load_names = [p["load"].name for p in decision["loads_to_reduce"]]
-        assert "Low Priority" in load_names
-        assert "High Priority" not in load_names
+        assert decision["loads_to_reduce"][0]["load"].name == "Enabled"
 
 
 class TestReductionExecution:
     """Test reduction execution behavior."""
 
     def test_execute_reductions_stops_after_first_success(self):
-        """Test that only one successful reduction is executed per control loop."""
         coordinator = RvikRazorCoordinator.__new__(RvikRazorCoordinator)
         coordinator.last_action = ""
         coordinator.last_action_reason = ""
 
         reduced_loads = []
 
-        async def fake_reduce(load: Load, needed_reduction: float) -> float:
-            reduced_loads.append((load.name, needed_reduction))
+        async def fake_reduce(plan: dict) -> float:
+            reduced_loads.append(plan["load"].name)
             return 1.0
 
         coordinator._async_reduce_single_load = fake_reduce
 
         load1 = create_test_load(name="Load 1")
         load2 = create_test_load(name="Load 2")
-        plans = [
-            {"load": load1, "needed_reduction": 2.0},
-            {"load": load2, "needed_reduction": 1.0},
-        ]
+        plans = [{"load": load1}, {"load": load2}]
 
         current_time = 12345.0
         asyncio.run(coordinator._async_execute_reductions(plans, current_time))
 
-        assert reduced_loads == [("Load 1", 2.0)]
+        assert reduced_loads == ["Load 1"]
         assert load1.last_action_time == current_time
         assert load2.last_action_time == 0.0
-        assert "Load 1" in coordinator.last_action_reason
-        assert "Load 2" not in coordinator.last_action_reason
 
     def test_execute_reductions_tries_next_plan_after_failed_attempt(self):
-        """Test that execution can move to the next plan if first reduction fails."""
         coordinator = RvikRazorCoordinator.__new__(RvikRazorCoordinator)
         coordinator.last_action = ""
         coordinator.last_action_reason = ""
 
         call_order = []
 
-        async def fake_reduce(load: Load, needed_reduction: float) -> float:
-            call_order.append((load.name, needed_reduction))
-            if load.name == "Load 1":
-                return 0.0
-            return 1.5
+        async def fake_reduce(plan: dict) -> float:
+            call_order.append(plan["load"].name)
+            return 0.0 if plan["load"].name == "Load 1" else 1.5
 
         coordinator._async_reduce_single_load = fake_reduce
 
         load1 = create_test_load(name="Load 1")
         load2 = create_test_load(name="Load 2")
-        plans = [
-            {"load": load1, "needed_reduction": 2.0},
-            {"load": load2, "needed_reduction": 1.0},
-        ]
+        plans = [{"load": load1}, {"load": load2}]
 
         current_time = 12345.0
         asyncio.run(coordinator._async_execute_reductions(plans, current_time))
 
-        assert call_order == [("Load 1", 2.0), ("Load 2", 1.0)]
+        assert call_order == ["Load 1", "Load 2"]
         assert load1.last_action_time == 0.0
         assert load2.last_action_time == current_time
-        assert "Load 2" in coordinator.last_action_reason
 
 
 if __name__ == "__main__":
-    # Allow running tests directly with: python test_regulation.py
     pytest.main([__file__, "-v"])

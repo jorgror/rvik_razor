@@ -1,0 +1,43 @@
+# RVik Razor
+
+RVik Razor manages controllable electrical consumption so a home can stay near a configured hourly energy set point.
+
+## Language
+
+**Load**:
+A controllable electrical consumer whose consumption can be reduced or restored by RVik Razor.
+
+**Eligible load**:
+A load that is available for regulation in the current control cycle.
+
+**Priority**:
+The configured order in which loads are considered for regulation. Lower priority numbers are considered first for reduction; higher priority numbers are considered first for restoration.
+
+**Hourly set point**:
+The configured target energy consumption for the current clock hour.
+_Avoid_: Hourly limit, effective target
+
+**Projection**:
+The expected energy consumption at the end of the current clock hour.
+
+**Power estimate**:
+An estimate of a load's current or candidate electrical consumption.
+
+**Accuracy**:
+How close projected hourly consumption is to the hourly set point.
+_Avoid_: Safety margin
+
+**Accuracy deadband**:
+The minimum accuracy improvement required before RVik Razor changes a load.
+_Avoid_: Restore margin
+
+**Control direction**:
+Whether the current cycle is trying to reduce or restore consumption based on the projection relative to the hourly set point.
+
+**Reduce**:
+Move a load toward lower electrical consumption.
+_Avoid_: Stop, turn off
+
+**Restore**:
+Move a load toward higher electrical consumption.
+_Avoid_: Start, turn on

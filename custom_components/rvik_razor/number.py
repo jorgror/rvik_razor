@@ -29,10 +29,10 @@ async def async_setup_entry(
 
 
 class RvikRazorMaxHourKwhNumber(NumberEntity):
-    """Number entity for max hour kWh limit."""
+    """Number entity for hourly energy set point."""
 
     _attr_has_entity_name = True
-    _attr_name = "Max hour kWh"
+    _attr_name = "Hourly set point"
     _attr_icon = "mdi:gauge"
     _attr_native_min_value = 0.1
     _attr_native_max_value = 100.0
@@ -62,7 +62,7 @@ class RvikRazorMaxHourKwhNumber(NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         """Set new value."""
-        _LOGGER.info("Setting max hour kWh to %.2f", value)
+        _LOGGER.info("Setting hourly set point to %.2f kWh", value)
 
         # Update config entry
         new_data = {**self.entry.data, CONF_MAX_HOUR_KWH: value}
