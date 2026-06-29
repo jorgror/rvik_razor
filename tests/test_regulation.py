@@ -95,6 +95,17 @@ class TestAvailableDownCapacity:
             11.08, rel=0.02
         )
 
+    def test_ev_charger_prefers_measured_power_over_nominal_capacity(self):
+        load = create_test_load(
+            load_type=LoadType.EV_AMPERE,
+            current_ampere=16.0,
+            current_power_kw=7.2,
+            phases=3,
+            voltage=400,
+        )
+
+        assert calculate_available_down_capacity([load]) == pytest.approx(7.2)
+
 
 class TestPowerPerAmpere:
     """Test nominal power-per-ampere fallback calculations."""
@@ -330,6 +341,24 @@ class TestHorizonRegulationDecisions:
 
         assert decision["action"] == "restore"
         assert decision["loads_to_restore"][0]["new_value"] == 32
+
+    def test_ev_decision_prefers_measured_power_over_nominal(self):
+        load = create_test_load(
+            load_type=LoadType.EV_AMPERE,
+            current_ampere=4,
+            current_power_kw=2.0,
+            phases=1,
+            voltage=1000,
+        )
+
+        decision = decide([load], current_hour_kwh=4.0, house_power_kw=4.0)
+
+        assert decision["action"] == "reduce"
+        assert decision["loads_to_reduce"][0]["new_value"] == 0
+        assert decision["loads_to_reduce"][0]["power_per_ampere"] == pytest.approx(
+            0.5
+        )
+        assert decision["candidate_projected_end_kwh"] == pytest.approx(5.0)
 
 
 class TestEnabledEntityFeature:
