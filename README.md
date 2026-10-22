@@ -131,6 +131,8 @@ A late-hour charger can list the charge-current entities of the vehicles that ch
 - **Raise** it only when at least 2 A more fits, and at most every 5 minutes.
 - **Stop** the charger by the late-hour stop rule when even 6 A does not fit.
 
+Vehicles draw very different power per ampere on the same charger. On one 3-phase charger, a Tesla Model 3 drew about 0.68 kW/A and a Model Y about 0.4 kW/A. Once the current has been steady for a minute, RVik Razor measures the bound vehicle's kW per ampere from the charger's power and uses it for the rest of the plug-in. Until then, the load's **assumed power** is taken as its power at the maximum current, so set it for the most powerful vehicle (for example 11 kW).
+
 To find which vehicle is charging, RVik Razor refreshes the listed vehicles once the charger draws at least 1 kW. It binds the one vehicle that is online, charging, at `home` and reporting about the charger's measured power. With no clear match, it retries up to 3 times per plug-in, 5 minutes apart, and otherwise keeps on/off control.
 
 Vehicle commands are billed by Tesla's Fleet API, so:

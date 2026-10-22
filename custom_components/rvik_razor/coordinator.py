@@ -41,6 +41,7 @@ from .const import (
     TRIM_CHARGING_THRESHOLD_KW,
     TRIM_IDENTIFY_INTERVAL,
     TRIM_IDENTIFY_MAX_ATTEMPTS,
+    TRIM_LEARN_SETTLE,
     TRIM_VERIFY_DELAY,
     TRIM_VERIFY_TOLERANCE_KW,
 )
@@ -521,9 +522,13 @@ def _calculate_late_hour_action(
 def _vehicle_power_per_ampere(load: Load) -> float:
     """Estimate kW per ampere for a vehicle charging on a late-hour load.
 
-    The load's assumed power is its power at the maximum current, which is
-    how the late-hour start rule sizes it as well.
+    Vehicles differ a lot per ampere on the same charger, so the value
+    measured for the bound vehicle wins. Until it is measured, the load's
+    assumed power is taken as its power at the maximum current, which errs
+    high when the assumed power is sized for the most powerful vehicle.
     """
+    if load.vehicle_power_per_ampere:
+        return load.vehicle_power_per_ampere
     if load.assumed_power_kw and load.vehicle_max_ampere > 0:
         return load.assumed_power_kw / load.vehicle_max_ampere
     if load.current_power_kw and load.vehicle_ampere:
@@ -599,10 +604,19 @@ def _calculate_vehicle_trim(
 
 
 def _estimate_late_load_run_power(load: Load) -> float | None:
-    """Estimate a late-hour load's power when running, erring high."""
+    """Estimate a late-hour load's power when running, erring high.
+
+    For a bound vehicle whose kW per ampere is measured, full power is that
+    rate at its maximum current rather than the load's assumed power.
+    """
+    full_power_kw = (
+        load.vehicle_power_per_ampere * load.vehicle_max_ampere
+        if load.vehicle_power_per_ampere
+        else load.assumed_power_kw
+    )
     estimates = [
         value
-        for value in (load.current_power_kw, load.assumed_power_kw)
+        for value in (load.current_power_kw, full_power_kw)
         if value is not None and value > 0
     ]
     return max(estimates) if estimates else None
@@ -1139,6 +1153,7 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         for load in self.loads:
             load.vehicle_ampere = None
+            load.vehicle_power_per_ampere = None
             if not (
                 load.enabled
                 and _is_late_hour_load(load)
@@ -1181,6 +1196,23 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     session.status = "Charger did not follow the vehicle current"
                     continue
 
+            # Measure kW per ampere once the current has settled. Keep the
+            # highest value, since a vehicle tapering off draws less than its
+            # current allows but never more.
+            if (
+                charging
+                and session.ampere > 0
+                and now - session.changed_time >= TRIM_LEARN_SETTLE
+                and now - session.bound_time >= TRIM_LEARN_SETTLE
+            ):
+                session.power_per_ampere = max(
+                    session.power_per_ampere,
+                    (load.current_power_kw or 0.0) / session.ampere,
+                )
+            load.vehicle_power_per_ampere = session.power_per_ampere or None
+            load.vehicle_min_ampere = session.min_ampere
+            load.vehicle_max_ampere = session.max_ampere
+
             if not charging:
                 continue
             if self._trim_commands_today >= DEFAULT_TRIM_DAILY_COMMAND_BUDGET:
@@ -1188,8 +1220,6 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 continue
 
             load.vehicle_ampere = session.ampere
-            load.vehicle_min_ampere = session.min_ampere
-            load.vehicle_max_ampere = session.max_ampere
             load.vehicle_ampere_changed_time = session.changed_time
 
     async def _async_identify_vehicle(
@@ -1242,6 +1272,7 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             float(state.attributes.get("max", DEFAULT_TRIM_MAX_AMPERE)),
         )
         session.changed_time = 0.0
+        session.bound_time = now
         _LOGGER.info("%s: %s at %.0fA", load.name, reason, ampere)
 
     async def _async_set_vehicle_ampere(self, load: Load, target: int) -> bool:
@@ -1284,6 +1315,8 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         session.ampere = float(target)
         session.changed_time = time.time()
         session.status = f"{session.ampere_entity_id} at {target}A"
+        if session.power_per_ampere:
+            session.status += f" ({session.power_per_ampere:.2f}kW/A)"
         if target < previous:
             session.lowered = True
             session.verify_after = session.changed_time + TRIM_VERIFY_DELAY

@@ -152,6 +152,41 @@ class TestTrimDecision:
         assert plan["type"] == "switch"
         assert plan["new_value"] == "off"
 
+    def test_measured_power_per_ampere_drives_the_fit(self):
+        load = create_trim_load(
+            vehicle_ampere=14,
+            current_power_kw=9.5,
+            vehicle_power_per_ampere=0.68,
+        )
+
+        decision = decide(
+            [load], current_hour_kwh=2.0, house_power_kw=11.5, remaining_seconds=1800
+        )
+
+        # 3.6 kW fits: under 6 A at the measured 0.68 kW/A, but 8 A at the
+        # 0.4 kW/A the assumed 6.4 kW at 16 A implies.
+        assert decision["loads_to_reduce"][0]["new_value"] == 6
+
+    def test_start_uses_measured_full_power_over_assumed_power(self):
+        measured = create_trim_load(
+            assumed_power_kw=11.0,
+            current_switch_state="off",
+            current_power_kw=0.0,
+            vehicle_ampere=None,
+            vehicle_power_per_ampere=0.4,
+        )
+        unmeasured = create_trim_load(
+            assumed_power_kw=11.0,
+            current_switch_state="off",
+            current_power_kw=0.0,
+            vehicle_ampere=None,
+        )
+
+        # 7.5 kW available until the end of the hour.
+        kwargs = dict(current_hour_kwh=0.85, house_power_kw=0.5, remaining_seconds=1800)
+        assert decide([measured], **kwargs)["action"] == "restore"
+        assert decide([unmeasured], **kwargs)["action"] == "none"
+
     def test_vehicle_entities_round_trip_through_config(self):
         load = create_trim_load()
 
@@ -352,6 +387,38 @@ class TestTrimSession:
         run(coordinator._async_update_vehicle_trim(1000.0))
 
         assert load.vehicle_ampere is None
+
+    def test_learns_power_per_ampere_once_the_current_settles(self, coordinator):
+        load = coordinator.loads[0]
+        run(coordinator._async_update_vehicle_trim(1000.0))
+        run(coordinator._async_update_vehicle_trim(1030.0))
+        assert load.vehicle_power_per_ampere is None
+
+        run(coordinator._async_update_vehicle_trim(1070.0))
+
+        assert load.vehicle_power_per_ampere == pytest.approx(6.3 / 16)
+
+    def test_tapering_does_not_lower_learned_power_per_ampere(self, coordinator):
+        load = coordinator.loads[0]
+        run(coordinator._async_update_vehicle_trim(1000.0))
+        run(coordinator._async_update_vehicle_trim(1070.0))
+        load.current_power_kw = 3.0
+
+        run(coordinator._async_update_vehicle_trim(1100.0))
+
+        assert load.vehicle_power_per_ampere == pytest.approx(6.3 / 16)
+
+    def test_learned_power_per_ampere_is_kept_while_paused(self, coordinator):
+        load = coordinator.loads[0]
+        run(coordinator._async_update_vehicle_trim(1000.0))
+        run(coordinator._async_update_vehicle_trim(1070.0))
+        load.current_switch_state = "off"
+        load.current_power_kw = 0.0
+
+        run(coordinator._async_update_vehicle_trim(1100.0))
+
+        assert load.vehicle_ampere is None
+        assert load.vehicle_power_per_ampere == pytest.approx(6.3 / 16)
 
     def test_unplug_restores_lowered_current(self, coordinator):
         load = coordinator.loads[0]
