@@ -398,6 +398,27 @@ class TestTrimSession:
 
         assert load.vehicle_power_per_ampere == pytest.approx(6.3 / 16)
 
+    def test_does_not_learn_while_the_vehicle_ramps_up_after_a_start(
+        self, coordinator
+    ):
+        load = coordinator.loads[0]
+        run(coordinator._async_update_vehicle_trim(1000.0))
+        load.current_switch_state = "off"
+        load.current_power_kw = 0.0
+        run(coordinator._async_update_vehicle_trim(1030.0))
+
+        # Charger starts again long after the last current change
+        load.current_switch_state = "on"
+        load.current_power_kw = 1.7
+        run(coordinator._async_update_vehicle_trim(3000.0))
+        load.current_power_kw = 6.3
+        run(coordinator._async_update_vehicle_trim(3030.0))
+        assert load.vehicle_power_per_ampere is None
+
+        run(coordinator._async_update_vehicle_trim(3060.0))
+
+        assert load.vehicle_power_per_ampere == pytest.approx(6.3 / 16)
+
     def test_tapering_does_not_lower_learned_power_per_ampere(self, coordinator):
         load = coordinator.loads[0]
         run(coordinator._async_update_vehicle_trim(1000.0))

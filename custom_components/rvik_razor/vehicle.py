@@ -36,6 +36,7 @@ class VehicleTrimSession:
     max_ampere: float = 0.0
     changed_time: float = 0.0
     bound_time: float = 0.0
+    charging_since: float | None = None  # Start of the current charging stretch
     power_per_ampere: float = 0.0  # Highest kW per ampere measured
     attempts: int = 0
     last_attempt_time: float = 0.0
