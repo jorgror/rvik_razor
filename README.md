@@ -26,6 +26,7 @@ RVik Razor automatically controls your EV charger and other loads to keep your *
 - **Priority**: Lower numbers are reduced first
 - **Enabled**: Static on/off toggle for the load
 - **Enabled Entity** (optional): Dynamic control via a binary sensor or input_boolean (e.g., only regulate EV charger when car is actually charging)
+- **Run late in the hour** (switch loads): Run the load at the end of each hour instead of switching it to hit the set point (recommended for an on/off EV charger, see [Late-hour loads](#late-hour-loads))
 
 ### Operation Modes
 - **Off**: All control disabled, loads restored to original state
@@ -109,7 +110,17 @@ projection_error_kwh = projected_end_kwh - hourly_set_point_kwh
 
 4. **Safety Features**:
    - 120-second cooldown per load between actions
-   - Hour rollover detection and reset
+   - Hour rollover detection and reset; control waits (up to 2 minutes) until the hour energy sensor has reset, since many meters reset it some seconds after the hour
+
+### Late-hour loads
+
+Switch loads marked **Run late in the hour** are left out of the set-point control above and follow their own rule ([ADR 0002](docs/adr/0002-run-binary-loads-late-in-the-hour.md)):
+
+- **Start** once the load can run at full power until the end of the hour, with 0.6 kW to spare.
+- **Stop** when the rest of the house no longer leaves room for it (up to 1.0 kW shortfall is accepted). The projection is never allowed more than 0.2 kWh above the set point while it runs.
+- **Minimum times**: the load stays on and off for at least 5 minutes each; the 0.2 kWh cap overrides the minimum on time.
+
+Consumption therefore happens late in each hour, where it can be cut if a shower or cooking starts. An on/off EV charger typically starts once per hour. The regulation timeout does not apply to late-hour loads.
    - Control pauses for the cycle when house power is unavailable
 
 ## Configuration Examples
@@ -175,7 +186,7 @@ custom_components/rvik_razor/
 
 - Support for total_energy sensors with baseline calculation
 - Advanced power smoothing/averaging
-- Min on/off time for switches
+- Ampere-controlled late-hour charging
 - Per-load cooldown configuration
 - Climate control integration
 - Rich status entity
@@ -195,6 +206,7 @@ custom_components/rvik_razor/
 - Check logs for error messages
 
 ### Oscillating behavior
+- For an on/off load such as an EV charger, enable **Run late in the hour**
 - Increase restore margin (currently hardcoded at 0.1 kWh)
 - Verify power sensor is stable (not fluctuating wildly)
 - Consider increasing update interval

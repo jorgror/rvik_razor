@@ -18,6 +18,7 @@ from .const import (
     CONF_LOAD_ASSUMED_POWER,
     CONF_LOAD_ENABLED,
     CONF_LOAD_ENABLED_ENTITY,
+    CONF_LOAD_LATE_IN_HOUR,
     CONF_LOAD_NAME,
     CONF_LOAD_PHASES,
     CONF_LOAD_POWER_SENSOR,
@@ -447,6 +448,9 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
                 vol.Optional(
                     CONF_LOAD_SWITCH_INVERTED, default=False
                 ): selector.BooleanSelector(),
+                vol.Optional(
+                    CONF_LOAD_LATE_IN_HOUR, default=False
+                ): selector.BooleanSelector(),
                 vol.Optional(CONF_LOAD_POWER_SENSOR): selector.EntitySelector(
                     selector.EntitySelectorConfig(
                         domain="sensor",
@@ -680,6 +684,7 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
         # Get current values for defaults
         current_switch = self.current_load.get(CONF_LOAD_SWITCH_ENTITY) or ""
         current_inverted = self.current_load.get(CONF_LOAD_SWITCH_INVERTED, False)
+        current_late = self.current_load.get(CONF_LOAD_LATE_IN_HOUR, False)
         current_power = self.current_load.get(CONF_LOAD_POWER_SENSOR) or None
         current_assumed = self.current_load.get(CONF_LOAD_ASSUMED_POWER)
         current_name = self.current_load.get(CONF_LOAD_NAME) or ""
@@ -731,6 +736,10 @@ class RvikRazorOptionsFlow(config_entries.OptionsFlow):
         schema_dict[
             vol.Optional(CONF_LOAD_SWITCH_INVERTED, default=current_inverted)
         ] = selector.BooleanSelector()
+
+        schema_dict[vol.Optional(CONF_LOAD_LATE_IN_HOUR, default=current_late)] = (
+            selector.BooleanSelector()
+        )
 
         # Only add default for power_sensor if it has a valid value
         if current_power and current_power != "None":

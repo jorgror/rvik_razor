@@ -32,6 +32,7 @@ CONF_LOAD_VOLTAGE = "voltage"
 # Switch-specific configuration
 CONF_LOAD_SWITCH_ENTITY = "switch_entity"
 CONF_LOAD_SWITCH_INVERTED = "switch_inverted"
+CONF_LOAD_LATE_IN_HOUR = "late_in_hour"
 
 # Regulation timing configuration
 CONF_LOAD_TIMEOUT = "timeout"
@@ -46,6 +47,15 @@ DEFAULT_PHASES = 3
 DEFAULT_VOLTAGE = 400
 # Load timeout configuration
 DEFAULT_LOAD_TIMEOUT = 120  # seconds between regulations for a load
+# Wait this long after the hour for the hour energy sensor to reset
+HOUR_ENERGY_RESET_MAX_WAIT = 120  # seconds
+
+# Late-hour load rule (see docs/adr/0002-run-binary-loads-late-in-the-hour.md)
+DEFAULT_LATE_START_SLACK_KW = 0.6  # Spare power required before starting
+DEFAULT_LATE_STOP_TOLERANCE_KW = 1.0  # Shortfall accepted before stopping
+DEFAULT_LATE_OVERSHOOT_CAP_KWH = 0.2  # Max projected overshoot while running
+DEFAULT_LATE_MIN_ON = 300  # seconds
+DEFAULT_LATE_MIN_OFF = 300  # seconds
 
 # Fallback ampere limits when entity doesn't provide them
 FALLBACK_MIN_AMPERE = 0
@@ -94,6 +104,7 @@ class Load:
     # Switch-specific fields
     switch_entity_id: str | None = None
     switch_inverted: bool = False  # If True, switch consumes power when OFF
+    late_in_hour: bool = False  # Run late in the hour instead of to the set point
 
     # Regulation timing
     timeout: int = DEFAULT_LOAD_TIMEOUT  # Seconds between regulations
@@ -126,6 +137,7 @@ class Load:
             CONF_LOAD_VOLTAGE: self.voltage,
             CONF_LOAD_SWITCH_ENTITY: self.switch_entity_id,
             CONF_LOAD_SWITCH_INVERTED: self.switch_inverted,
+            CONF_LOAD_LATE_IN_HOUR: self.late_in_hour,
             CONF_LOAD_TIMEOUT: self.timeout,
         }
 
@@ -145,6 +157,7 @@ class Load:
             voltage=data.get(CONF_LOAD_VOLTAGE, DEFAULT_VOLTAGE),
             switch_entity_id=data.get(CONF_LOAD_SWITCH_ENTITY),
             switch_inverted=data.get(CONF_LOAD_SWITCH_INVERTED, False),
+            late_in_hour=data.get(CONF_LOAD_LATE_IN_HOUR, False),
             timeout=data.get(CONF_LOAD_TIMEOUT, DEFAULT_LOAD_TIMEOUT),
         )
 
