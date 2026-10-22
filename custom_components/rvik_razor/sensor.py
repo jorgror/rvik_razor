@@ -54,6 +54,8 @@ SENSORS: tuple[RvikRazorSensorEntityDescription, ...] = (
             "last_action": data.get("last_action"),
             "last_action_reason": data.get("last_action_reason"),
             "mode": data.get("mode"),
+            "vehicle_trim": data.get("vehicle_trim"),
+            "vehicle_commands_today": data.get("vehicle_commands_today"),
         },
     ),
     RvikRazorSensorEntityDescription(

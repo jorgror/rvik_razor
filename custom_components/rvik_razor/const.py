@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
@@ -33,6 +33,7 @@ CONF_LOAD_VOLTAGE = "voltage"
 CONF_LOAD_SWITCH_ENTITY = "switch_entity"
 CONF_LOAD_SWITCH_INVERTED = "switch_inverted"
 CONF_LOAD_LATE_IN_HOUR = "late_in_hour"
+CONF_LOAD_VEHICLE_AMPERE_ENTITIES = "vehicle_ampere_entities"
 
 # Regulation timing configuration
 CONF_LOAD_TIMEOUT = "timeout"
@@ -56,6 +57,20 @@ DEFAULT_LATE_STOP_TOLERANCE_KW = 1.0  # Shortfall accepted before stopping
 DEFAULT_LATE_OVERSHOOT_CAP_KWH = 0.2  # Max projected overshoot while running
 DEFAULT_LATE_MIN_ON = 300  # seconds
 DEFAULT_LATE_MIN_OFF = 300  # seconds
+
+# Vehicle amp trim for late-hour loads (see docs/adr/0003-trim-vehicle-charge-current.md)
+DEFAULT_TRIM_MIN_AMPERE = 6
+DEFAULT_TRIM_MAX_AMPERE = 16  # Charger installation limit
+DEFAULT_TRIM_MARGIN_KW = 0.2  # Power kept spare when fitting the current
+DEFAULT_TRIM_RAISE_STEP = 2  # Only raise when this many more amperes fit
+DEFAULT_TRIM_RAISE_INTERVAL = 300  # seconds between raises
+DEFAULT_TRIM_DAILY_COMMAND_BUDGET = 150  # Vehicle API commands per day
+TRIM_CHARGING_THRESHOLD_KW = 1.0  # Load power that counts as charging
+TRIM_IDENTIFY_INTERVAL = 300  # seconds between attempts to find the vehicle
+TRIM_IDENTIFY_MAX_ATTEMPTS = 3  # per plug-in session
+TRIM_POWER_MATCH_KW = 1.5  # Max difference between vehicle and charger power
+TRIM_VERIFY_DELAY = 120  # seconds before checking that a reduction took effect
+TRIM_VERIFY_TOLERANCE_KW = 1.0  # Excess power that means the wrong vehicle
 
 # Fallback ampere limits when entity doesn't provide them
 FALLBACK_MIN_AMPERE = 0
@@ -105,6 +120,8 @@ class Load:
     switch_entity_id: str | None = None
     switch_inverted: bool = False  # If True, switch consumes power when OFF
     late_in_hour: bool = False  # Run late in the hour instead of to the set point
+    # Charge-current number entities of vehicles that may charge on this load
+    vehicle_ampere_entity_ids: list[str] = field(default_factory=list)
 
     # Regulation timing
     timeout: int = DEFAULT_LOAD_TIMEOUT  # Seconds between regulations
@@ -121,6 +138,12 @@ class Load:
     current_min_ampere: float | None = None  # Runtime min from EV ampere entity
     current_max_ampere: float | None = None  # Runtime max from EV ampere entity
     current_power_kw: float | None = None  # Measured power from power_sensor_entity_id
+    # Charge current of the vehicle charging on a late-hour load; None when
+    # amp trim is not available and the load runs on/off only.
+    vehicle_ampere: float | None = None
+    vehicle_min_ampere: float = DEFAULT_TRIM_MIN_AMPERE
+    vehicle_max_ampere: float = DEFAULT_TRIM_MAX_AMPERE
+    vehicle_ampere_changed_time: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         """Convert load to dictionary for storage."""
@@ -138,6 +161,7 @@ class Load:
             CONF_LOAD_SWITCH_ENTITY: self.switch_entity_id,
             CONF_LOAD_SWITCH_INVERTED: self.switch_inverted,
             CONF_LOAD_LATE_IN_HOUR: self.late_in_hour,
+            CONF_LOAD_VEHICLE_AMPERE_ENTITIES: list(self.vehicle_ampere_entity_ids),
             CONF_LOAD_TIMEOUT: self.timeout,
         }
 
@@ -158,6 +182,9 @@ class Load:
             switch_entity_id=data.get(CONF_LOAD_SWITCH_ENTITY),
             switch_inverted=data.get(CONF_LOAD_SWITCH_INVERTED, False),
             late_in_hour=data.get(CONF_LOAD_LATE_IN_HOUR, False),
+            vehicle_ampere_entity_ids=list(
+                data.get(CONF_LOAD_VEHICLE_AMPERE_ENTITIES) or []
+            ),
             timeout=data.get(CONF_LOAD_TIMEOUT, DEFAULT_LOAD_TIMEOUT),
         )
 

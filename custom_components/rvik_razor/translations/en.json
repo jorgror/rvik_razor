@@ -71,6 +71,7 @@
           "switch_entity": "Switch entity",
           "switch_inverted": "Inverted (consumes power when OFF)",
           "late_in_hour": "Run late in the hour (e.g. EV charger on/off)",
+          "vehicle_ampere_entities": "Vehicle charge current entities (trim current while charging late in the hour)",
           "power_sensor": "Power sensor (optional)",
           "assumed_power_kw": "Assumed power when on (kW, optional)",
           "timeout": "Regulation timeout (seconds between changes)"

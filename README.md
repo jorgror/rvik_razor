@@ -27,6 +27,7 @@ RVik Razor automatically controls your EV charger and other loads to keep your *
 - **Enabled**: Static on/off toggle for the load
 - **Enabled Entity** (optional): Dynamic control via a binary sensor or input_boolean (e.g., only regulate EV charger when car is actually charging)
 - **Run late in the hour** (switch loads): Run the load at the end of each hour instead of switching it to hit the set point (recommended for an on/off EV charger, see [Late-hour loads](#late-hour-loads))
+- **Vehicle charge current entities** (late-hour switch loads, optional): The charge-current number entities of the vehicles that charge on this charger, for example `number.<car>_charge_current` from the Tesla Fleet integration. RVik Razor then trims the charging vehicle's current instead of only switching the charger (see [Vehicle amp trim](#vehicle-amp-trim))
 
 ### Operation Modes
 - **Off**: All control disabled, loads restored to original state
@@ -121,6 +122,26 @@ Switch loads marked **Run late in the hour** are left out of the set-point contr
 - **Minimum times**: the load stays on and off for at least 5 minutes each; the 0.2 kWh cap overrides the minimum on time.
 
 Consumption therefore happens late in each hour, where it can be cut if a shower or cooking starts. An on/off EV charger typically starts once per hour. The regulation timeout does not apply to late-hour loads.
+
+### Vehicle amp trim
+
+A late-hour charger can list the charge-current entities of the vehicles that charge on it ([ADR 0003](docs/adr/0003-trim-vehicle-charge-current.md)). The charger switch still starts and stops charging by the late-hour rule. While a vehicle charges, RVik Razor also fits its charge current to the room left in the hour:
+
+- **Lower** the current at once when it no longer fits, down to 6 A.
+- **Raise** it only when at least 2 A more fits, and at most every 5 minutes.
+- **Stop** the charger by the late-hour stop rule when even 6 A does not fit.
+
+To find which vehicle is charging, RVik Razor refreshes the listed vehicles once the charger draws at least 1 kW. It binds the one vehicle that is online, charging, at `home` and reporting about the charger's measured power. With no clear match, it retries up to 3 times per plug-in, 5 minutes apart, and otherwise keeps on/off control.
+
+Vehicle commands are billed by Tesla's Fleet API, so:
+
+- Disable polling on the Tesla Fleet integration (**System options → Enable polling for updates**). RVik Razor refreshes the vehicles only when it needs to.
+- Commands are sent only while the vehicle draws power, so it is awake, and never to a vehicle the integration believes is asleep. A wake is billed far higher than a command.
+- At most 150 commands are sent per day. With real consumption this was about 60 a day.
+- If the charger does not follow a lowered current within 2 minutes, RVik Razor assumes the wrong vehicle and keeps on/off control until it is unplugged.
+- A lowered current is set back to 16 A when the vehicle is unplugged, since vehicles remember their current per location.
+
+The projected sensor shows the status in `vehicle_trim` and the number of commands sent today in `vehicle_commands_today`.
    - Control pauses for the cycle when house power is unavailable
 
 ## Configuration Examples
@@ -186,7 +207,7 @@ custom_components/rvik_razor/
 
 - Support for total_energy sensors with baseline calculation
 - Advanced power smoothing/averaging
-- Ampere-controlled late-hour charging
+- Configurable amp-trim limits (6–16 A, 150 commands/day are fixed)
 - Per-load cooldown configuration
 - Climate control integration
 - Rich status entity
