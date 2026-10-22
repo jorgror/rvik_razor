@@ -13,6 +13,7 @@ from custom_components.rvik_razor.coordinator import (
     _calculate_nominal_power_per_ampere,
     calculate_available_down_capacity,
     calculate_regulation_decision,
+    is_hour_energy_reset_pending,
 )
 
 
@@ -456,6 +457,249 @@ class TestReductionExecution:
         assert call_order == ["Load 1", "Load 2"]
         assert load1.last_action_time == 0.0
         assert load2.last_action_time == current_time
+
+
+class TestHourEnergyReset:
+    """Test detection of an hour energy sensor that has not reset yet."""
+
+    def test_reading_from_previous_hour_is_pending(self):
+        assert is_hour_energy_reset_pending(4.62, 4.60, seconds_into_hour=16)
+
+    def test_reset_reading_is_not_pending(self):
+        assert not is_hour_energy_reset_pending(0.01, 4.60, seconds_into_hour=22)
+
+    def test_gives_up_waiting_after_max_wait(self):
+        assert not is_hour_energy_reset_pending(4.62, 4.60, seconds_into_hour=130)
+
+    def test_not_pending_without_previous_hour(self):
+        assert not is_hour_energy_reset_pending(4.0, None, seconds_into_hour=5)
+
+
+def create_late_load(**kwargs) -> Load:
+    """Create a late-hour EV switch load drawing about 4 kW."""
+    defaults = {
+        "name": "EV",
+        "priority": 1,
+        "late_in_hour": True,
+        "assumed_power_kw": 4.0,
+        "current_switch_state": "off",
+        "current_power_kw": 0.0,
+    }
+    defaults.update(kwargs)
+    return create_test_load(**defaults)
+
+
+class TestLateHourLoads:
+    """Test the late-hour start/stop rule for switch loads."""
+
+    def test_waits_early_in_hour(self):
+        load = create_late_load()
+
+        decision = decide(
+            [load],
+            current_hour_kwh=0.2,
+            house_power_kw=1.5,
+            set_point_kwh=4.6,
+            remaining_seconds=3000,
+        )
+
+        assert decision["action"] == "none"
+        assert "Waiting to start EV late in hour" in decision["reason"]
+
+    def test_starts_once_it_fits_until_end_of_hour(self):
+        load = create_late_load()
+
+        decision = decide(
+            [load],
+            current_hour_kwh=0.5,
+            house_power_kw=1.5,
+            set_point_kwh=4.6,
+            remaining_seconds=1800,
+        )
+
+        assert decision["action"] == "restore"
+        assert decision["loads_to_restore"][0]["load"].name == "EV"
+        assert decision["loads_to_restore"][0]["new_value"] == "on"
+
+    def test_start_respects_minimum_off_time(self):
+        now = time.time()
+        load = create_late_load(last_action_time=now - 60)
+
+        decision = decide(
+            [load],
+            current_hour_kwh=0.5,
+            house_power_kw=1.5,
+            set_point_kwh=4.6,
+            remaining_seconds=1800,
+            current_time=now,
+        )
+
+        assert decision["action"] == "none"
+        assert "minimum off time" in decision["reason"]
+
+    def test_keeps_running_within_stop_tolerance(self):
+        load = create_late_load(current_switch_state="on", current_power_kw=4.0)
+
+        decision = decide(
+            [load],
+            current_hour_kwh=2.0,
+            house_power_kw=5.5,
+            set_point_kwh=4.6,
+            remaining_seconds=1800,
+        )
+
+        assert decision["action"] == "none"
+        assert "Running EV late in hour" in decision["reason"]
+
+    def test_stops_when_short_after_minimum_on_time(self):
+        load = create_late_load(current_switch_state="on", current_power_kw=4.0)
+
+        decision = decide(
+            [load],
+            current_hour_kwh=3.86,
+            house_power_kw=5.5,
+            set_point_kwh=4.6,
+            remaining_seconds=600,
+        )
+
+        assert decision["action"] == "reduce"
+        assert decision["loads_to_reduce"][0]["new_value"] == "off"
+
+    def test_minimum_on_time_delays_tolerance_stop(self):
+        now = time.time()
+        load = create_late_load(
+            current_switch_state="on",
+            current_power_kw=4.0,
+            last_action_time=now - 60,
+        )
+
+        decision = decide(
+            [load],
+            current_hour_kwh=3.86,
+            house_power_kw=5.5,
+            set_point_kwh=4.6,
+            remaining_seconds=600,
+            current_time=now,
+        )
+
+        assert decision["action"] == "none"
+
+    def test_overshoot_cap_stops_even_within_minimum_on_time(self):
+        now = time.time()
+        load = create_late_load(
+            current_switch_state="on",
+            current_power_kw=4.0,
+            last_action_time=now - 60,
+        )
+
+        decision = decide(
+            [load],
+            current_hour_kwh=2.0,
+            house_power_kw=7.0,
+            set_point_kwh=4.6,
+            remaining_seconds=1800,
+            current_time=now,
+        )
+
+        assert decision["action"] == "reduce"
+        assert decision["loads_to_reduce"][0]["load"].name == "EV"
+
+    def test_idle_running_load_is_not_stopped(self):
+        load = create_late_load(current_switch_state="on", current_power_kw=0.0)
+
+        decision = decide(
+            [load],
+            current_hour_kwh=0.0,
+            house_power_kw=1.5,
+            set_point_kwh=4.6,
+            remaining_seconds=3550,
+        )
+
+        assert decision["action"] == "none"
+
+    def test_other_loads_use_horizon_control_around_running_late_load(self):
+        late = create_late_load(current_switch_state="on", current_power_kw=4.0)
+        heater = create_test_load(
+            name="Heater",
+            priority=10,
+            current_switch_state="on",
+            current_power_kw=0.5,
+        )
+
+        decision = decide(
+            [late, heater],
+            current_hour_kwh=4.08,
+            house_power_kw=6.0,
+            set_point_kwh=4.6,
+            remaining_seconds=360,
+        )
+
+        assert decision["action"] == "reduce"
+        assert decision["loads_to_reduce"][0]["load"].name == "Heater"
+
+    def test_late_in_hour_round_trips_through_config(self):
+        load = create_late_load()
+
+        assert Load.from_dict(load.to_dict()).late_in_hour is True
+        default = Load.from_dict({"name": "X", "type": "switch", "priority": 1})
+        assert default.late_in_hour is False
+
+
+class FakeState:
+    """Minimal Home Assistant state."""
+
+    def __init__(self, state: str, attributes: dict | None = None) -> None:
+        self.state = state
+        self.attributes = attributes or {}
+
+
+class FakeHass:
+    """Minimal Home Assistant core with states and services."""
+
+    def __init__(self, states: dict[str, FakeState]) -> None:
+        self.calls: list[tuple[str, str, dict]] = []
+        self.states = self
+        self.services = self
+        self._states = states
+
+    def get(self, entity_id: str) -> FakeState | None:
+        return self._states.get(entity_id)
+
+    async def async_call(self, domain, service, data, blocking=False):
+        self.calls.append((domain, service, data))
+
+
+class TestSwitchRestoreExecution:
+    """Test that switch restores count as actions even at 0 W."""
+
+    def test_restore_succeeds_while_power_sensor_reads_zero(self):
+        coordinator = RvikRazorCoordinator.__new__(RvikRazorCoordinator)
+        coordinator.last_action = ""
+        coordinator.last_action_reason = ""
+        coordinator.hass = FakeHass(
+            {
+                "switch.ev": FakeState("off"),
+                "sensor.ev_power": FakeState("0.0", {"unit_of_measurement": "W"}),
+            }
+        )
+        load = create_test_load(
+            name="EV",
+            switch_entity_id="switch.ev",
+            power_sensor_entity_id="sensor.ev_power",
+            assumed_power_kw=4.0,
+        )
+
+        asyncio.run(
+            coordinator._async_execute_restorations(
+                [{"load": load, "new_value": "on"}], 12345.0
+            )
+        )
+
+        assert coordinator.hass.calls == [
+            ("switch", "turn_on", {"entity_id": "switch.ev"})
+        ]
+        assert load.last_action_time == 12345.0
+        assert coordinator.last_action == "Restored loads"
 
 
 if __name__ == "__main__":

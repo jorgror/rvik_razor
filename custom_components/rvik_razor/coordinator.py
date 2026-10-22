@@ -18,10 +18,16 @@ from .const import (
     CONF_MODE,
     DEFAULT_ACCURACY_DEADBAND_KWH,
     DEFAULT_COOLDOWN,
+    DEFAULT_LATE_MIN_OFF,
+    DEFAULT_LATE_MIN_ON,
+    DEFAULT_LATE_OVERSHOOT_CAP_KWH,
+    DEFAULT_LATE_START_SLACK_KW,
+    DEFAULT_LATE_STOP_TOLERANCE_KW,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     FALLBACK_MAX_AMPERE,
     FALLBACK_MIN_AMPERE,
+    HOUR_ENERGY_RESET_MAX_WAIT,
     Load,
     LoadType,
     OperationMode,
@@ -59,6 +65,25 @@ def _calculate_ev_power_per_ampere(load: Load) -> float:
         return load.measured_power_per_ampere
 
     return nominal_ratio
+
+
+def is_hour_energy_reset_pending(
+    current_hour_kwh: float,
+    previous_hour_kwh: float | None,
+    seconds_into_hour: float,
+    max_wait: float = HOUR_ENERGY_RESET_MAX_WAIT,
+) -> bool:
+    """Return True while the hour energy sensor still shows the previous hour.
+
+    Meters often reset their hour counter some seconds after the clock hour.
+    Until the reading drops below the previous hour's last value, it belongs
+    to the previous hour and would project far above the set point.
+    """
+    if previous_hour_kwh is None or previous_hour_kwh <= 0:
+        return False
+    if seconds_into_hour >= max_wait:
+        return False
+    return current_hour_kwh >= previous_hour_kwh
 
 
 def calculate_available_down_capacity(loads: list[Load]) -> float:
@@ -131,10 +156,16 @@ def calculate_regulation_decision(
     current_time: float,
     cooldown: float = DEFAULT_COOLDOWN,
     accuracy_deadband_kwh: float = DEFAULT_ACCURACY_DEADBAND_KWH,
+    late_start_slack_kw: float = DEFAULT_LATE_START_SLACK_KW,
+    late_stop_tolerance_kw: float = DEFAULT_LATE_STOP_TOLERANCE_KW,
+    late_overshoot_cap_kwh: float = DEFAULT_LATE_OVERSHOOT_CAP_KWH,
+    late_min_on: float = DEFAULT_LATE_MIN_ON,
+    late_min_off: float = DEFAULT_LATE_MIN_OFF,
 ) -> dict[str, Any]:
     """Calculate a projection-based regulation action.
 
-    The controller chooses direction from the current end-of-hour projection,
+    Late-hour loads are decided first by their own start/stop rule. Otherwise
+    the controller chooses direction from the current end-of-hour projection,
     then evaluates the first eligible load in priority order for that direction.
     It only acts when that load improves accuracy by more than the deadband.
     """
@@ -162,6 +193,62 @@ def calculate_regulation_decision(
         result["reason"] = "No time remaining in current hour"
         return result
 
+    late_plan, late_status = _calculate_late_hour_action(
+        loads=[load for load in loads if load.enabled and _is_late_hour_load(load)],
+        current_hour_kwh=current_hour_kwh,
+        house_power_kw=house_power_kw,
+        remaining_hours=remaining_hours,
+        hourly_set_point_kwh=hourly_set_point_kwh,
+        current_time=current_time,
+        start_slack_kw=late_start_slack_kw,
+        stop_tolerance_kw=late_stop_tolerance_kw,
+        overshoot_cap_kwh=late_overshoot_cap_kwh,
+        min_on=late_min_on,
+        min_off=late_min_off,
+    )
+    if late_plan is not None:
+        direction = late_plan["direction"]
+        result["action"] = direction
+        result["candidate_projected_end_kwh"] = late_plan["candidate_projected_end_kwh"]
+        result["reason"] = late_status
+        if direction == "reduce":
+            result["loads_to_reduce"] = [late_plan]
+            result["remaining_reduction"] = max(
+                0.0, house_power_kw - late_plan["candidate_house_power_kw"]
+            )
+        else:
+            result["loads_to_restore"] = [late_plan]
+        return result
+
+    decision = _calculate_horizon_decision(
+        result=result,
+        loads=[
+            load for load in loads if load.enabled and not _is_late_hour_load(load)
+        ],
+        current_hour_kwh=current_hour_kwh,
+        house_power_kw=house_power_kw,
+        hourly_set_point_kwh=hourly_set_point_kwh,
+        remaining_hours=remaining_hours,
+        current_time=current_time,
+        accuracy_deadband_kwh=accuracy_deadband_kwh,
+    )
+    if decision["action"] == "none" and late_status:
+        decision["reason"] = f"{late_status}; {decision['reason']}"
+    return decision
+
+
+def _calculate_horizon_decision(
+    result: dict[str, Any],
+    loads: list[Load],
+    current_hour_kwh: float,
+    house_power_kw: float,
+    hourly_set_point_kwh: float,
+    remaining_hours: float,
+    current_time: float,
+    accuracy_deadband_kwh: float,
+) -> dict[str, Any]:
+    """Choose one horizon set-point action among non-late-hour loads."""
+    projected_end_kwh = result["projected_end_kwh"]
     projection_delta = projected_end_kwh - hourly_set_point_kwh
     current_error = abs(projection_delta)
     if current_error <= accuracy_deadband_kwh:
@@ -173,7 +260,7 @@ def calculate_regulation_decision(
 
     direction = "reduce" if projection_delta > 0 else "restore"
     sorted_loads = sorted(
-        [load for load in loads if load.enabled],
+        loads,
         key=lambda load: load.priority,
         reverse=direction == "restore",
     )
@@ -229,6 +316,149 @@ def calculate_regulation_decision(
     result["reason"] = f"No eligible loads available to {direction}"
 
     return result
+
+
+def _is_late_hour_load(load: Load) -> bool:
+    """Return True if the load follows the late-hour rule."""
+    return load.late_in_hour and load.load_type == LoadType.SWITCH
+
+
+def _calculate_late_hour_action(
+    loads: list[Load],
+    current_hour_kwh: float,
+    house_power_kw: float,
+    remaining_hours: float,
+    hourly_set_point_kwh: float,
+    current_time: float,
+    start_slack_kw: float,
+    stop_tolerance_kw: float,
+    overshoot_cap_kwh: float,
+    min_on: float,
+    min_off: float,
+) -> tuple[dict[str, Any] | None, str]:
+    """Decide whether a late-hour load should start or stop.
+
+    A late-hour load only starts once it can run at full power until the end of
+    the hour, which pushes its consumption late in the hour. It stops when the
+    rest of the house no longer leaves room for it, so it stays available to
+    absorb consumption that turns up late in the hour.
+
+    Returns the plan for at most one action (stops before starts) and a status
+    describing what the late-hour loads are doing.
+    """
+    stops: list[dict[str, Any]] = []
+    starts: list[dict[str, Any]] = []
+    statuses: list[str] = []
+
+    for load in sorted(loads, key=lambda load: load.priority):
+        if load.current_switch_state not in ("on", "off"):
+            continue
+        run_power = _estimate_late_load_run_power(load)
+        if run_power is None:
+            continue
+
+        consuming_state = "off" if load.switch_inverted else "on"
+        reduced_state = "on" if load.switch_inverted else "off"
+        running = load.current_switch_state == consuming_state
+
+        # A running load drawing less than its run power (finished, ramping) is
+        # projected at what it draws now; the next cycle sees any increase.
+        load_power_now = (
+            load.current_power_kw
+            if load.current_power_kw is not None
+            else (run_power if running else 0.0)
+        )
+        base_power_kw = max(0.0, house_power_kw - load_power_now)
+        room_kwh = hourly_set_point_kwh - (
+            current_hour_kwh + base_power_kw * remaining_hours
+        )
+        available_kw = room_kwh / remaining_hours
+        since_action = current_time - load.last_action_time
+
+        plan_args = {
+            "load": load,
+            "plan_type": "switch",
+            "current_load_power_kw": load_power_now,
+            "current_hour_kwh": current_hour_kwh,
+            "house_power_kw": house_power_kw,
+            "remaining_hours": remaining_hours,
+            "hourly_set_point_kwh": hourly_set_point_kwh,
+        }
+
+        if running:
+            projected_with_load_kwh = (
+                current_hour_kwh + (base_power_kw + load_power_now) * remaining_hours
+            )
+            over_cap = (
+                projected_with_load_kwh > hourly_set_point_kwh + overshoot_cap_kwh
+            )
+            short = available_kw < load_power_now - stop_tolerance_kw
+            if over_cap or (short and since_action >= min_on):
+                stops.append(
+                    {
+                        **_build_horizon_plan(
+                            **plan_args,
+                            candidate_load_power_kw=0.0,
+                            new_value=reduced_state,
+                            reduction_kw=load_power_now,
+                        ),
+                        "direction": "reduce",
+                        "reason": (
+                            f"Late-hour stop {load.name}: projected "
+                            f"{projected_with_load_kwh:.2f}kWh while running, "
+                            f"{available_kw:.2f}kW available"
+                        ),
+                    }
+                )
+            else:
+                statuses.append(f"Running {load.name} late in hour")
+            continue
+
+        if since_action < min_off:
+            statuses.append(
+                f"{load.name} off for minimum off time "
+                f"({min_off - since_action:.0f}s remaining)"
+            )
+        elif available_kw >= run_power + start_slack_kw:
+            starts.append(
+                {
+                    **_build_horizon_plan(
+                        **plan_args,
+                        candidate_load_power_kw=run_power,
+                        new_value=consuming_state,
+                        reduction_kw=0.0,
+                    ),
+                    "direction": "restore",
+                    "reason": (
+                        f"Late-hour start {load.name}: {available_kw:.2f}kW "
+                        f"available until end of hour"
+                    ),
+                }
+            )
+        else:
+            statuses.append(
+                f"Waiting to start {load.name} late in hour "
+                f"(needs {run_power + start_slack_kw:.2f}kW, "
+                f"{available_kw:.2f}kW available)"
+            )
+
+    if stops:
+        return stops[0], stops[0]["reason"]
+    if starts:
+        # Highest priority number is restored first, as for horizon control.
+        plan = starts[-1]
+        return plan, plan["reason"]
+    return None, "; ".join(statuses)
+
+
+def _estimate_late_load_run_power(load: Load) -> float | None:
+    """Estimate a late-hour load's power when running, erring high."""
+    estimates = [
+        value
+        for value in (load.current_power_kw, load.assumed_power_kw)
+        if value is not None and value > 0
+    ]
+    return max(estimates) if estimates else None
 
 
 def _estimate_switch_consuming_power(load: Load) -> float | None:
@@ -428,6 +658,8 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.last_hour: int = datetime.now().hour
         self.last_action = "Initialized"
         self.last_action_reason = ""
+        self._last_hour_kwh: float | None = None
+        self._previous_hour_kwh: float | None = None
 
     def _load_config(self) -> None:
         """Load configuration and create Load objects."""
@@ -591,8 +823,16 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "Hour rollover detected: %d -> %d", self.last_hour, now.hour
                 )
                 self.last_hour = now.hour
+                self._previous_hour_kwh = self._last_hour_kwh
                 self.last_action = "Hour rollover"
                 self.last_action_reason = "New hour started, resetting calculations"
+
+            hour_reset_pending = is_hour_energy_reset_pending(
+                current_hour_kwh,
+                self._previous_hour_kwh,
+                seconds_into_hour=3600.0 - remaining_seconds,
+            )
+            self._last_hour_kwh = current_hour_kwh
 
             # Calculate projected end of hour kWh
             if house_power_kw is not None and remaining_seconds > 0:
@@ -626,6 +866,12 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if house_power_kw is None:
                     self.last_action = "Cannot regulate"
                     self.last_action_reason = "House power sensor unavailable"
+                elif hour_reset_pending:
+                    self.last_action = "Waiting for hour reset"
+                    self.last_action_reason = (
+                        f"Hour energy sensor still shows the previous hour "
+                        f"({current_hour_kwh:.2f}kWh)"
+                    )
                 else:
                     await self._async_execute_control(
                         current_hour_kwh,
@@ -739,11 +985,11 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for plan in reduction_plans:
             load = plan["load"]
 
-            reduction_achieved = await self._async_reduce_single_load(plan)
-
-            if reduction_achieved > 0:
+            if await self._async_reduce_single_load(plan):
                 load.last_action_time = current_time
-                actions_taken.append(f"{load.name}: -{reduction_achieved:.2f}kW")
+                actions_taken.append(
+                    f"{load.name}: -{plan.get('reduction_kw', 0.0):.2f}kW"
+                )
                 # Only reduce one load per control loop to avoid overshooting.
                 break
             else:
@@ -768,14 +1014,16 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 failed_actions,
             )
 
-    async def _async_reduce_single_load(self, plan: dict[str, Any]) -> float:
-        """Reduce a single load and return achieved reduction in kW."""
+    async def _async_reduce_single_load(self, plan: dict[str, Any]) -> bool:
+        """Reduce a single load and return whether it was changed."""
         load = plan["load"]
         if load.load_type == LoadType.EV_AMPERE:
-            return await self._async_set_ev_load(load, plan["new_value"], "reduce")
+            return (
+                await self._async_set_ev_load(load, plan["new_value"], "reduce") > 0
+            )
         elif load.load_type == LoadType.SWITCH:
             return await self._async_set_switch_load(load, plan["new_value"])
-        return 0.0
+        return False
 
     async def _async_set_ev_load(
         self, load: Load, target_ampere: float, direction: str
@@ -858,14 +1106,18 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.error("Failed to %s %s: %s", direction, load.name, err)
             return 0.0
 
-    async def _async_set_switch_load(self, load: Load, target_state: str) -> float:
-        """Set switch load to a target state and return estimated power change."""
+    async def _async_set_switch_load(self, load: Load, target_state: str) -> bool:
+        """Set switch load to a target state and return whether it was changed.
+
+        Success does not depend on measured power: a switch being turned on
+        typically reads 0 W until it starts consuming.
+        """
         if not load.switch_entity_id:
             _LOGGER.warning(
                 "Load %s has no switch_entity_id configured, cannot regulate",
                 load.name,
             )
-            return 0.0
+            return False
 
         state = self.hass.states.get(load.switch_entity_id)
         if not state:
@@ -874,7 +1126,7 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 load.name,
                 load.switch_entity_id,
             )
-            return 0.0
+            return False
 
         _LOGGER.debug(
             "Load %s: switch_entity=%s, state=%s, inverted=%s",
@@ -885,20 +1137,10 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
         if state.state == target_state:
-            return 0.0
+            return False
 
         target_service = "turn_on" if target_state == "on" else "turn_off"
-
-        # Determine power reduction
-        power_kw = 0.0
-        if load.power_sensor_entity_id:
-            power_state = self.hass.states.get(load.power_sensor_entity_id)
-            if power_state and power_state.state not in ("unknown", "unavailable"):
-                power_value = float(power_state.state)
-                unit = power_state.attributes.get("unit_of_measurement", "W")
-                power_kw = power_value / 1000.0 if unit == "W" else power_value
-        elif load.assumed_power_kw:
-            power_kw = load.assumed_power_kw
+        power_kw = _estimate_switch_consuming_power(load) or 0.0
 
         # Execute switch action
         try:
@@ -914,10 +1156,10 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 target_state,
                 power_kw,
             )
-            return power_kw
+            return True
         except Exception as err:
             _LOGGER.error("Failed to switch %s: %s", load.name, err)
-            return 0.0
+            return False
 
     async def _async_execute_restorations(
         self,
@@ -967,7 +1209,7 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     > 0
                 )
             elif load.load_type == LoadType.SWITCH and load.switch_entity_id:
-                return await self._async_set_switch_load(load, plan["new_value"]) > 0
+                return await self._async_set_switch_load(load, plan["new_value"])
         except Exception as err:
             _LOGGER.error("Failed to restore %s: %s", load.name, err)
 
@@ -982,7 +1224,7 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     restored.append(load.name)
             elif load.load_type == LoadType.SWITCH:
                 target_state = "off" if load.switch_inverted else "on"
-                if await self._async_set_switch_load(load, target_state) > 0:
+                if await self._async_set_switch_load(load, target_state):
                     restored.append(load.name)
 
         if restored:
