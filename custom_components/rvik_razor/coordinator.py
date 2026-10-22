@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
@@ -46,6 +47,8 @@ from .const import (
     TRIM_LEARN_SETTLE,
     TRIM_RAISE_CONFIRM,
     TRIM_RAISE_HEADROOM,
+    TRIM_SAVE_DELAY,
+    TRIM_STORAGE_VERSION,
     TRIM_VERIFY_DELAY,
     TRIM_VERIFY_TOLERANCE_KW,
 )
@@ -877,6 +880,12 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._trim_sessions: dict[str, VehicleTrimSession] = {}
         self._trim_commands_today = 0
         self._trim_budget_day = date.today()
+        # The bound vehicle and its measured kW per ampere outlive a restart,
+        # so a vehicle still plugged in is not taken at the assumed power.
+        self._trim_store: Store[dict[str, Any]] = Store(
+            hass, TRIM_STORAGE_VERSION, f"{DOMAIN}.{entry_id}.vehicle_trim"
+        )
+        self._trim_saved: dict[str, Any] | None = None
 
     def _load_config(self) -> None:
         """Load configuration and create Load objects."""
@@ -1097,6 +1106,7 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         house_power_kw,
                         remaining_seconds,
                     )
+                    self._async_save_trim_state()
             elif mode == OperationMode.OFF:
                 # In OFF mode, restore all loads to original values
                 await self._async_restore_all_loads("Mode is OFF")
@@ -1192,6 +1202,31 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             self.last_action = "No action"
             self.last_action_reason = decision["reason"]
+
+    async def async_restore_trim_state(self) -> None:
+        """Restore the vehicle trim sessions saved before a restart."""
+        data = await self._trim_store.async_load()
+        if not data:
+            return
+        self._trim_saved = data
+        if data.get("day") == date.today().isoformat():
+            self._trim_commands_today = data.get("commands", 0)
+        for name, session in data.get("sessions", {}).items():
+            self._trim_sessions[name] = VehicleTrimSession.from_dict(session)
+
+    def _async_save_trim_state(self) -> None:
+        """Save the vehicle trim sessions when they changed."""
+        state = {
+            "day": self._trim_budget_day.isoformat(),
+            "commands": self._trim_commands_today,
+            "sessions": {
+                name: session.to_dict()
+                for name, session in self._trim_sessions.items()
+            },
+        }
+        if state != self._trim_saved:
+            self._trim_saved = state
+            self._trim_store.async_delay_save(lambda: state, TRIM_SAVE_DELAY)
 
     async def _async_update_vehicle_trim(self, now: float) -> None:
         """Track which vehicle charges on each late-hour load and expose its current.

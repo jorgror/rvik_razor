@@ -76,6 +76,8 @@ TRIM_FOLLOW_HOLD = 60  # seconds to let the vehicle follow a new current or star
 TRIM_RAISE_CONFIRM = 60  # seconds a raise must keep fitting before it is sent
 TRIM_END_OF_HOUR = 600  # seconds before the hour ends when cuts go 1 A deeper
 TRIM_RAISE_HEADROOM = 1  # amperes left spare when raising
+TRIM_STORAGE_VERSION = 1  # Vehicle trim state kept across restarts
+TRIM_SAVE_DELAY = 10  # seconds to batch writes of the vehicle trim state
 
 # Fallback ampere limits when entity doesn't provide them
 FALLBACK_MIN_AMPERE = 0
