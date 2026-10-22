@@ -1171,6 +1171,10 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             session.unplugged_cycles = 0
 
             charging = (load.current_power_kw or 0.0) >= TRIM_CHARGING_THRESHOLD_KW
+            if not charging:
+                session.charging_since = None
+            elif session.charging_since is None:
+                session.charging_since = now
             if session.ampere_entity_id is None:
                 if (
                     charging
@@ -1196,7 +1200,8 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     session.status = "Charger did not follow the vehicle current"
                     continue
 
-            # Measure kW per ampere once the current has settled. Keep the
+            # Measure kW per ampere once the current has settled and the
+            # vehicle has ramped up after the charger started. Keep the
             # highest value, since a vehicle tapering off draws less than its
             # current allows but never more.
             if (
@@ -1204,6 +1209,7 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 and session.ampere > 0
                 and now - session.changed_time >= TRIM_LEARN_SETTLE
                 and now - session.bound_time >= TRIM_LEARN_SETTLE
+                and now - session.charging_since >= TRIM_LEARN_SETTLE
             ):
                 session.power_per_ampere = max(
                     session.power_per_ampere,
