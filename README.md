@@ -127,11 +127,12 @@ Consumption therefore happens late in each hour, where it can be cut if a shower
 
 A late-hour charger can list the charge-current entities of the vehicles that charge on it ([ADR 0003](docs/adr/0003-trim-vehicle-charge-current.md)). The charger switch still starts and stops charging by the late-hour rule. While a vehicle charges, RVik Razor also fits its charge current to the room left in the hour:
 
-- **Lower** the current at once when it no longer fits, down to 6 A.
-- **Raise** it only when at least 2 A more fits, and at most every 5 minutes.
-- **Stop** the charger by the late-hour stop rule when even 6 A does not fit.
+- **Lower** the current at once when it no longer fits, down to 6 A. In the last 10 minutes of the hour, lower it 1 A further.
+- **Raise** it, keeping 1 A spare, only when at least 2 A more has fitted for a minute, and at most every 5 minutes.
+- **Stop** the charger by the late-hour stop rule when even 6 A does not fit, without lowering the current first.
+- **Wait** a minute after each change and after the charger starts, while the vehicle follows. The charger can report its power later than the meter.
 
-Vehicles draw very different power per ampere on the same charger. On one 3-phase charger, a Tesla Model 3 drew about 0.68 kW/A and a Model Y about 0.4 kW/A. Once the current has been steady for a minute, RVik Razor measures the bound vehicle's kW per ampere from the charger's power and uses it for the rest of the plug-in. Until then, the load's **assumed power** is taken as its power at the maximum current, so set it for the most powerful vehicle (for example 11 kW).
+Vehicles draw very different power per ampere on the same charger, and one vehicle can change rate between charging stretches or after a lower current. On one 3-phase charger, a Tesla drew about 0.67 kW/A after it was plugged in, and about 0.4 kW/A after its first lower current or pause. Once the current has been steady for a minute, RVik Razor measures the bound vehicle's kW per ampere from the charger's power, and measures again after each change. The next start after a pause uses the rate the vehicle last drew. Until the first measurement, the load's **assumed power** is taken as its power at the maximum current, so set it for the most powerful vehicle (for example 11 kW).
 
 To find which vehicle is charging, RVik Razor refreshes the listed vehicles once the charger draws at least 1 kW. It binds the one vehicle that is online, charging, at `home` and reporting about the charger's measured power. With no clear match, it retries up to 3 times per plug-in, 5 minutes apart, and otherwise keeps on/off control.
 
@@ -139,7 +140,7 @@ Vehicle commands are billed by Tesla's Fleet API, so:
 
 - Disable polling on the Tesla Fleet integration (**System options → Enable polling for updates**). RVik Razor refreshes the vehicles only when it needs to.
 - Commands are sent only while the vehicle draws power, so it is awake, and never to a vehicle the integration believes is asleep. A wake is billed far higher than a command.
-- At most 150 commands are sent per day. With real consumption this was about 60 a day.
+- At most 150 commands are sent per day. With real consumption this was about 25–60 a day.
 - If the charger does not follow a lowered current within 2 minutes, RVik Razor assumes the wrong vehicle and keeps on/off control until it is unplugged.
 - A lowered current is set back to 16 A when the vehicle is unplugged, since vehicles remember their current per location.
 

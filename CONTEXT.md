@@ -47,6 +47,9 @@ Fitting the charge current of the vehicle charging on a late-hour load to the ro
 **Charging vehicle**:
 The one vehicle RVik Razor has identified as charging on a late-hour load during the current plug-in. It must be online, charging, at home and drawing about the charger's measured power.
 
+**Charging stretch**:
+An unbroken period in which the charging vehicle draws power, from a charger start to a stop or pause. A vehicle's kW per ampere can differ between stretches.
+
 **Restore**:
 Move a load toward higher electrical consumption.
 _Avoid_: Start, turn on
