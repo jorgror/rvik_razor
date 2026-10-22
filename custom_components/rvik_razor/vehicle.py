@@ -9,7 +9,8 @@ when RVik Razor asks for it (polling disabled).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, fields
+from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
@@ -52,6 +53,26 @@ class VehicleTrimSession:
     verify_after: float | None = None
     verify_max_power_kw: float = 0.0
     status: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the session to a dictionary kept across restarts.
+
+        Timers of the current charging stretch are left out, since charging
+        restarts its stretch after a restart.
+        """
+        data = asdict(self)
+        for transient in SESSION_TRANSIENT_FIELDS:
+            data.pop(transient)
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> VehicleTrimSession:
+        """Restore a session saved by to_dict, ignoring unknown fields."""
+        known = {field.name for field in fields(cls)} - set(SESSION_TRANSIENT_FIELDS)
+        return cls(**{key: value for key, value in data.items() if key in known})
+
+
+SESSION_TRANSIENT_FIELDS = ("charging_since", "settle_until", "unplugged_cycles")
 
 
 @dataclass

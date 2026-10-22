@@ -331,6 +331,21 @@ class FakeHass:
         self.calls.append((domain, service, data))
 
 
+class FakeStore:
+    """Minimal Home Assistant storage that writes at once."""
+
+    def __init__(self, data: dict | None = None) -> None:
+        self.data = data
+        self.saves = 0
+
+    async def async_load(self) -> dict | None:
+        return self.data
+
+    def async_delay_save(self, data_func, delay: float = 0) -> None:
+        self.data = data_func()
+        self.saves += 1
+
+
 def vehicle_states(prefix: str, online: bool, charging: str, location: str) -> dict:
     """States of one vehicle's sibling entities."""
     return {
@@ -365,6 +380,8 @@ def coordinator(monkeypatch):
     coord._trim_sessions = {}
     coord._trim_commands_today = 0
     coord._trim_budget_day = date.today()
+    coord._trim_store = FakeStore()
+    coord._trim_saved = None
     coord.hass = FakeHass(
         {
             CAR_A: FakeState("16", {"min": 0, "max": 32}),
@@ -593,3 +610,72 @@ class TestTrimSession:
             ("number", "set_value", {"entity_id": CAR_A, "value": 16})
         ]
         assert coordinator._trim_sessions["EV"].ampere_entity_id is None
+
+
+class TestTrimRestart:
+    """Test keeping the bound vehicle and its rate across a restart."""
+
+    def restarted(self, coordinator):
+        """A new coordinator restored from what the old one saved."""
+        new = RvikRazorCoordinator.__new__(RvikRazorCoordinator)
+        new.last_action = new.last_action_reason = ""
+        new._trim_sessions = {}
+        new._trim_commands_today = 0
+        new._trim_budget_day = date.today()
+        new._trim_store = FakeStore(coordinator._trim_store.data)
+        new._trim_saved = None
+        new.hass = coordinator.hass
+        new.loads = [create_trim_load(vehicle_ampere=None)]
+        run(new.async_restore_trim_state())
+        return new
+
+    def test_measured_rate_survives_a_restart_while_paused(self, coordinator):
+        load = coordinator.loads[0]
+        run(coordinator._async_update_vehicle_trim(1000.0))
+        run(coordinator._async_update_vehicle_trim(1070.0))
+        load.current_switch_state = "off"
+        load.current_power_kw = 0.0
+        run(coordinator._async_update_vehicle_trim(1100.0))
+        coordinator._async_save_trim_state()
+
+        new = self.restarted(coordinator)
+        load = new.loads[0]
+        load.current_switch_state = "off"
+        load.current_power_kw = 0.0
+        run(new._async_update_vehicle_trim(1200.0))
+
+        assert load.vehicle_power_per_ampere == pytest.approx(6.3 / 16)
+        assert new._trim_sessions["EV"].ampere_entity_id == CAR_A
+
+    def test_lowered_current_is_restored_when_unplugged_after_a_restart(
+        self, coordinator
+    ):
+        load = coordinator.loads[0]
+        run(coordinator._async_update_vehicle_trim(1000.0))
+        run(coordinator._async_set_vehicle_ampere(load, 8))
+        coordinator._async_save_trim_state()
+
+        new = self.restarted(coordinator)
+        new.hass.calls.clear()
+        new.loads[0].current_switch_state = None
+        run(new._async_update_vehicle_trim(1030.0))
+        run(new._async_update_vehicle_trim(1060.0))
+
+        assert new.hass.calls == [
+            ("number", "set_value", {"entity_id": CAR_A, "value": 16})
+        ]
+
+    def test_commands_count_toward_the_same_day_only(self, coordinator):
+        coordinator._trim_commands_today = 40
+        coordinator._async_save_trim_state()
+        assert self.restarted(coordinator)._trim_commands_today == 40
+
+        coordinator._trim_store.data["day"] = "2000-01-01"
+        assert self.restarted(coordinator)._trim_commands_today == 0
+
+    def test_saves_only_when_something_changed(self, coordinator):
+        run(coordinator._async_update_vehicle_trim(1000.0))
+        coordinator._async_save_trim_state()
+        coordinator._async_save_trim_state()
+
+        assert coordinator._trim_store.saves == 1
