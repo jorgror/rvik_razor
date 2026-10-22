@@ -71,6 +71,7 @@ TRIM_IDENTIFY_MAX_ATTEMPTS = 3  # per plug-in session
 TRIM_POWER_MATCH_KW = 1.5  # Max difference between vehicle and charger power
 TRIM_VERIFY_DELAY = 120  # seconds before checking that a reduction took effect
 TRIM_VERIFY_TOLERANCE_KW = 1.0  # Excess power that means the wrong vehicle
+TRIM_LEARN_SETTLE = 60  # seconds at a steady current before measuring kW per ampere
 
 # Fallback ampere limits when entity doesn't provide them
 FALLBACK_MIN_AMPERE = 0
@@ -144,6 +145,8 @@ class Load:
     vehicle_min_ampere: float = DEFAULT_TRIM_MIN_AMPERE
     vehicle_max_ampere: float = DEFAULT_TRIM_MAX_AMPERE
     vehicle_ampere_changed_time: float = 0.0
+    # kW per ampere measured for the vehicle bound to the load this plug-in
+    vehicle_power_per_ampere: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert load to dictionary for storage."""

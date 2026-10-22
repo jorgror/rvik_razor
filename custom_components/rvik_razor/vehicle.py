@@ -35,6 +35,8 @@ class VehicleTrimSession:
     min_ampere: float = 0.0
     max_ampere: float = 0.0
     changed_time: float = 0.0
+    bound_time: float = 0.0
+    power_per_ampere: float = 0.0  # Highest kW per ampere measured
     attempts: int = 0
     last_attempt_time: float = 0.0
     failed: bool = False  # Give up on amp trim until the vehicle is unplugged
