@@ -41,6 +41,12 @@ _Avoid_: Stop, turn off
 **Late-hour load**:
 A switch load that runs at the end of each hour instead of being switched to hit the hourly set point. It starts only once it can run at full power until the hour ends.
 
+**Vehicle amp trim**:
+Fitting the charge current of the vehicle charging on a late-hour load to the room left in the hour, instead of only switching the charger on and off.
+
+**Charging vehicle**:
+The one vehicle RVik Razor has identified as charging on a late-hour load during the current plug-in. It must be online, charging, at home and drawing about the charger's measured power.
+
 **Restore**:
 Move a load toward higher electrical consumption.
 _Avoid_: Start, turn on
