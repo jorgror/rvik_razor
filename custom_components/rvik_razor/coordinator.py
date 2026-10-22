@@ -39,9 +39,13 @@ from .const import (
     LoadType,
     OperationMode,
     TRIM_CHARGING_THRESHOLD_KW,
+    TRIM_END_OF_HOUR,
+    TRIM_FOLLOW_HOLD,
     TRIM_IDENTIFY_INTERVAL,
     TRIM_IDENTIFY_MAX_ATTEMPTS,
     TRIM_LEARN_SETTLE,
+    TRIM_RAISE_CONFIRM,
+    TRIM_RAISE_HEADROOM,
     TRIM_VERIFY_DELAY,
     TRIM_VERIFY_TOLERANCE_KW,
 )
@@ -375,7 +379,9 @@ def _calculate_late_hour_action(
 
     While a vehicle with a known charge current charges on the load, its
     current is fitted to the room instead, and the stop rule applies at the
-    vehicle's minimum current.
+    vehicle's minimum current. Nothing is decided for the load for a minute
+    after its current changed or it started charging, while the vehicle
+    follows.
 
     Returns the plan for at most one action (stops, then current reductions,
     then starts, then current raises) and a status describing what the
@@ -422,7 +428,19 @@ def _calculate_late_hour_action(
             "hourly_set_point_kwh": hourly_set_point_kwh,
         }
 
-        if running and load.vehicle_ampere is not None:
+        trimmed = running and load.vehicle_ampere is not None
+        if not trimmed:
+            load.vehicle_raise_fits_since = None
+        if trimmed and current_time < load.vehicle_settle_until:
+            # The charger's power can lag the meter while the vehicle follows
+            # a new current or ramps up, which skews the rest of the house.
+            statuses.append(
+                f"Waiting for {load.name} to follow its current "
+                f"({load.vehicle_settle_until - current_time:.0f}s)"
+            )
+            continue
+        lower_to_minimum = None
+        if trimmed:
             trim_plan, trim_status = _calculate_vehicle_trim(
                 load=load,
                 plan_args=plan_args,
@@ -442,9 +460,20 @@ def _calculate_late_hour_action(
             if trim_status is not None:
                 statuses.append(trim_status)
                 continue
-            # Even the minimum current does not fit: apply the stop rule as if
-            # the vehicle already charged at its minimum current.
-            stop_power_kw = load.vehicle_min_ampere * _vehicle_power_per_ampere(load)
+            # Even the minimum current does not fit: apply the stop rule at
+            # the minimum current, before spending a command to lower it.
+            # Once at the minimum, what the vehicle draws is known.
+            power_per_ampere = _vehicle_power_per_ampere(load)
+            if load.vehicle_ampere > load.vehicle_min_ampere and power_per_ampere > 0:
+                stop_power_kw = load.vehicle_min_ampere * power_per_ampere
+                lower_to_minimum = _build_vehicle_trim_plan(
+                    load,
+                    plan_args,
+                    int(round(load.vehicle_min_ampere)),
+                    available_kw,
+                )
+            else:
+                stop_power_kw = load_power_now
         else:
             stop_power_kw = load_power_now
 
@@ -473,6 +502,8 @@ def _calculate_late_hour_action(
                         ),
                     }
                 )
+            elif lower_to_minimum is not None:
+                trim_reductions.append(lower_to_minimum)
             else:
                 statuses.append(f"Running {load.name} late in hour")
             continue
@@ -536,6 +567,11 @@ def _vehicle_power_per_ampere(load: Load) -> float:
     return 0.0
 
 
+def _session_power_per_ampere(session: VehicleTrimSession) -> float:
+    """kW per ampere measured this charging stretch, else in the last one."""
+    return session.power_per_ampere or session.previous_power_per_ampere
+
+
 def _calculate_vehicle_trim(
     load: Load,
     plan_args: dict[str, Any],
@@ -547,9 +583,10 @@ def _calculate_vehicle_trim(
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Fit a charging vehicle's current to the room left in the hour.
 
-    Lowers the current at once when it no longer fits, and raises it only when
-    a full raise step fits and the last change is old enough, since every
-    change is a billed vehicle command.
+    Lowers the current at once when it no longer fits, one ampere deeper near
+    the end of the hour. Raises it, keeping an ampere spare, only when a full
+    raise step has fitted for a minute and the last change is old enough, since
+    every change is a billed vehicle command.
 
     Returns a trim plan, or no plan with a status while the current is kept.
     Returns neither when even the minimum current does not fit, so the caller
@@ -565,27 +602,43 @@ def _calculate_vehicle_trim(
     # The small epsilon keeps an exact fit from rounding down a whole ampere.
     fitting = math.floor((available_kw - margin_kw) / power_per_ampere + 1e-9)
 
+    # A raise keeps an ampere spare, so a small rise in the rest of the house
+    # does not cut it straight back.
+    raise_to = fitting - TRIM_RAISE_HEADROOM
+    raise_fits = raise_to >= current + raise_step and current < maximum
+    if not raise_fits:
+        load.vehicle_raise_fits_since = None
+    elif load.vehicle_raise_fits_since is None:
+        load.vehicle_raise_fits_since = current_time
+
     if fitting < minimum:
-        if current > minimum:
-            target = minimum
-        else:
-            return None, None
-    elif fitting < current:
-        target = fitting
+        return None, None
+    if fitting < current:
+        # Near the end of the hour each ampere is worth less energy, so cut
+        # deeper rather than follow the room down one command at a time.
+        if plan_args["remaining_hours"] * 3600 < TRIM_END_OF_HOUR:
+            fitting -= 1
+        target = max(minimum, fitting)
     elif (
-        fitting >= current + raise_step
-        and current < maximum
+        raise_fits
+        and current_time - load.vehicle_raise_fits_since >= TRIM_RAISE_CONFIRM
         and current_time - load.vehicle_ampere_changed_time >= raise_interval
     ):
-        target = min(maximum, fitting)
+        target = min(maximum, raise_to)
     else:
         return None, (
             f"Running {load.name} at {current}A late in hour "
             f"({available_kw:.2f}kW available)"
         )
+    return _build_vehicle_trim_plan(load, plan_args, target, available_kw), None
 
-    direction = "reduce" if target < current else "restore"
-    candidate_power_kw = target * power_per_ampere
+
+def _build_vehicle_trim_plan(
+    load: Load, plan_args: dict[str, Any], target: int, available_kw: float
+) -> dict[str, Any]:
+    """Build the plan that sets a charging vehicle's current to target."""
+    current = int(round(load.vehicle_ampere or 0))
+    candidate_power_kw = target * _vehicle_power_per_ampere(load)
     current_power_kw = plan_args["current_load_power_kw"]
     return {
         **_build_horizon_plan(
@@ -595,12 +648,12 @@ def _calculate_vehicle_trim(
             reduction_kw=max(0.0, current_power_kw - candidate_power_kw),
         ),
         "type": "vehicle_ampere",
-        "direction": direction,
+        "direction": "reduce" if target < current else "restore",
         "reason": (
             f"Late-hour trim {load.name}: {current}A -> {target}A, "
             f"{available_kw:.2f}kW available"
         ),
-    }, None
+    }
 
 
 def _estimate_late_load_run_power(load: Load) -> float | None:
@@ -1172,6 +1225,10 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             charging = (load.current_power_kw or 0.0) >= TRIM_CHARGING_THRESHOLD_KW
             if not charging:
+                # The stretch is over. Its rate predicts the next start.
+                if session.power_per_ampere:
+                    session.previous_power_per_ampere = session.power_per_ampere
+                    session.power_per_ampere = 0.0
                 session.charging_since = None
             elif session.charging_since is None:
                 session.charging_since = now
@@ -1201,21 +1258,38 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     continue
 
             # Measure kW per ampere once the current has settled and the
-            # vehicle has ramped up after the charger started. Keep the
-            # highest value, since a vehicle tapering off draws less than its
-            # current allows but never more.
+            # vehicle has ramped up after the charger started. At an unchanged
+            # current keep the highest value, since a vehicle tapering off
+            # draws less than its current allows but never more.
+            settled = charging and now - session.changed_time >= TRIM_LEARN_SETTLE
             if (
-                charging
+                settled
                 and session.ampere > 0
-                and now - session.changed_time >= TRIM_LEARN_SETTLE
                 and now - session.bound_time >= TRIM_LEARN_SETTLE
                 and now - session.charging_since >= TRIM_LEARN_SETTLE
             ):
-                session.power_per_ampere = max(
-                    session.power_per_ampere,
-                    (load.current_power_kw or 0.0) / session.ampere,
+                measured = (load.current_power_kw or 0.0) / session.ampere
+                if session.measured_ampere == session.ampere:
+                    measured = max(session.power_per_ampere, measured)
+                session.power_per_ampere = measured
+                session.measured_ampere = session.ampere
+            power_per_ampere = _session_power_per_ampere(session)
+            if (
+                settled
+                and not session.power_per_ampere
+                and power_per_ampere
+                and session.ampere > 0
+            ):
+                # Until this stretch is measured, a vehicle drawing more than
+                # the last stretch's rate is taken at what it draws.
+                power_per_ampere = max(
+                    power_per_ampere, (load.current_power_kw or 0.0) / session.ampere
                 )
-            load.vehicle_power_per_ampere = session.power_per_ampere or None
+            load.vehicle_power_per_ampere = power_per_ampere or None
+            load.vehicle_settle_until = max(
+                session.settle_until,
+                (session.charging_since or 0.0) + TRIM_FOLLOW_HOLD,
+            )
             load.vehicle_min_ampere = session.min_ampere
             load.vehicle_max_ampere = session.max_ampere
 
@@ -1320,9 +1394,10 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         previous = session.ampere
         session.ampere = float(target)
         session.changed_time = time.time()
+        session.settle_until = session.changed_time + TRIM_FOLLOW_HOLD
         session.status = f"{session.ampere_entity_id} at {target}A"
-        if session.power_per_ampere:
-            session.status += f" ({session.power_per_ampere:.2f}kW/A)"
+        if power_per_ampere := _session_power_per_ampere(session):
+            session.status += f" ({power_per_ampere:.2f}kW/A)"
         if target < previous:
             session.lowered = True
             session.verify_after = session.changed_time + TRIM_VERIFY_DELAY

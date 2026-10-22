@@ -72,6 +72,10 @@ TRIM_POWER_MATCH_KW = 1.5  # Max difference between vehicle and charger power
 TRIM_VERIFY_DELAY = 120  # seconds before checking that a reduction took effect
 TRIM_VERIFY_TOLERANCE_KW = 1.0  # Excess power that means the wrong vehicle
 TRIM_LEARN_SETTLE = 60  # seconds at a steady current before measuring kW per ampere
+TRIM_FOLLOW_HOLD = 60  # seconds to let the vehicle follow a new current or start
+TRIM_RAISE_CONFIRM = 60  # seconds a raise must keep fitting before it is sent
+TRIM_END_OF_HOUR = 600  # seconds before the hour ends when cuts go 1 A deeper
+TRIM_RAISE_HEADROOM = 1  # amperes left spare when raising
 
 # Fallback ampere limits when entity doesn't provide them
 FALLBACK_MIN_AMPERE = 0
@@ -145,8 +149,11 @@ class Load:
     vehicle_min_ampere: float = DEFAULT_TRIM_MIN_AMPERE
     vehicle_max_ampere: float = DEFAULT_TRIM_MAX_AMPERE
     vehicle_ampere_changed_time: float = 0.0
-    # kW per ampere measured for the vehicle bound to the load this plug-in
+    # kW per ampere of the vehicle bound to the load, measured this charging
+    # stretch or, until then, the last one
     vehicle_power_per_ampere: float | None = None
+    vehicle_settle_until: float = 0.0  # No trim or stop while the vehicle follows
+    vehicle_raise_fits_since: float | None = None  # When a raise first fitted
 
     def to_dict(self) -> dict[str, Any]:
         """Convert load to dictionary for storage."""

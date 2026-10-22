@@ -37,7 +37,13 @@ class VehicleTrimSession:
     changed_time: float = 0.0
     bound_time: float = 0.0
     charging_since: float | None = None  # Start of the current charging stretch
-    power_per_ampere: float = 0.0  # Highest kW per ampere measured
+    # kW per ampere measured this charging stretch, at measured_ampere. The
+    # same vehicle can draw a different rate after a current change or a pause,
+    # for example when the charger switches phases.
+    power_per_ampere: float = 0.0
+    measured_ampere: float = 0.0
+    previous_power_per_ampere: float = 0.0  # Rate at the end of the last stretch
+    settle_until: float = 0.0  # Vehicle follows its last current change until then
     attempts: int = 0
     last_attempt_time: float = 0.0
     failed: bool = False  # Give up on amp trim until the vehicle is unplugged

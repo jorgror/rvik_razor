@@ -93,15 +93,30 @@ class TestTrimDecision:
         assert decision["action"] == "none"
         assert "Running EV at 10A late in hour" in decision["reason"]
 
-    def test_raises_when_a_full_step_fits(self):
+    def test_raises_when_a_full_step_fits_for_a_minute(self):
+        now = time.time()
         load = create_trim_load(vehicle_ampere=8, current_power_kw=3.2)
+        kwargs = dict(current_hour_kwh=1.5, house_power_kw=4.2, remaining_seconds=1800)
 
-        decision = decide(
-            [load], current_hour_kwh=1.5, house_power_kw=4.2, remaining_seconds=1800
-        )
+        assert decide([load], **kwargs, current_time=now)["action"] == "none"
+        decision = decide([load], **kwargs, current_time=now + 60)
 
+        # 13 A fits; the raise keeps an ampere spare.
         assert decision["action"] == "restore"
-        assert decision["loads_to_restore"][0]["new_value"] == 13
+        assert decision["loads_to_restore"][0]["new_value"] == 12
+
+    def test_raise_restarts_its_minute_when_the_room_goes(self):
+        now = time.time()
+        load = create_trim_load(vehicle_ampere=8, current_power_kw=3.2)
+        room = dict(current_hour_kwh=1.5, house_power_kw=4.2, remaining_seconds=1800)
+        busy = dict(current_hour_kwh=1.5, house_power_kw=6.2, remaining_seconds=1800)
+
+        decide([load], **room, current_time=now)
+        decide([load], **busy, current_time=now + 30)
+        decide([load], **room, current_time=now + 60)
+
+        assert decide([load], **room, current_time=now + 90)["action"] == "none"
+        assert decide([load], **room, current_time=now + 120)["action"] == "restore"
 
     def test_raise_waits_for_raise_interval(self):
         now = time.time()
@@ -160,12 +175,63 @@ class TestTrimDecision:
         )
 
         decision = decide(
-            [load], current_hour_kwh=2.0, house_power_kw=11.5, remaining_seconds=1800
+            [load], current_hour_kwh=1.9, house_power_kw=11.5, remaining_seconds=1800
         )
 
-        # 3.6 kW fits: under 6 A at the measured 0.68 kW/A, but 8 A at the
+        # 3.8 kW fits: under 6 A at the measured 0.68 kW/A, but 9 A at the
         # 0.4 kW/A the assumed 6.4 kW at 16 A implies.
         assert decision["loads_to_reduce"][0]["new_value"] == 6
+
+    def test_stops_without_lowering_first_when_minimum_does_not_fit(self):
+        load = create_trim_load(vehicle_ampere=10, current_power_kw=4.0)
+
+        decision = decide(
+            [load], current_hour_kwh=3.0, house_power_kw=10.4, remaining_seconds=900
+        )
+
+        plan = decision["loads_to_reduce"][0]
+        assert plan["type"] == "switch"
+        assert plan["new_value"] == "off"
+
+    def test_stop_rule_at_minimum_uses_what_the_vehicle_draws(self):
+        # At 6 A the vehicle draws 2.3 kW, not the 4.1 kW the last stretch's
+        # 0.68 kW/A predicts.
+        load = create_trim_load(
+            vehicle_ampere=6, current_power_kw=2.3, vehicle_power_per_ampere=0.68
+        )
+
+        decision = decide(
+            [load], current_hour_kwh=3.0, house_power_kw=7.4, remaining_seconds=900
+        )
+
+        assert decision["action"] == "none"
+
+    def test_holds_while_the_vehicle_follows_its_current(self):
+        now = time.time()
+        load = create_trim_load(
+            vehicle_ampere=8, current_power_kw=6.3, vehicle_settle_until=now + 30
+        )
+        kwargs = dict(current_hour_kwh=3.0, house_power_kw=12.0, remaining_seconds=900)
+
+        held = decide([load], **kwargs, current_time=now)
+        assert held["action"] == "none"
+        assert "follow its current" in held["reason"]
+        assert decide([load], **kwargs, current_time=now + 30)["action"] == "reduce"
+
+    def test_cuts_one_ampere_deeper_near_the_end_of_the_hour(self):
+        early = create_trim_load(vehicle_ampere=10, current_power_kw=4.0)
+        late = create_trim_load(vehicle_ampere=10, current_power_kw=4.0)
+
+        # 3.8 kW available: 9 A fits at 0.4 kW/A.
+        early_decision = decide(
+            [early], current_hour_kwh=3.35, house_power_kw=6.0, remaining_seconds=900
+        )
+        late_decision = decide(
+            [late], current_hour_kwh=3.93, house_power_kw=6.0, remaining_seconds=540
+        )
+
+        assert early_decision["loads_to_reduce"][0]["new_value"] == 9
+        assert late_decision["loads_to_reduce"][0]["new_value"] == 8
 
     def test_start_uses_measured_full_power_over_assumed_power(self):
         measured = create_trim_load(
@@ -440,6 +506,77 @@ class TestTrimSession:
 
         assert load.vehicle_ampere is None
         assert load.vehicle_power_per_ampere == pytest.approx(6.3 / 16)
+
+    def test_each_charging_stretch_learns_its_own_rate(self, coordinator):
+        load = coordinator.loads[0]
+        run(coordinator._async_update_vehicle_trim(1000.0))
+        run(coordinator._async_update_vehicle_trim(1070.0))
+        load.current_switch_state = "off"
+        load.current_power_kw = 0.0
+        run(coordinator._async_update_vehicle_trim(1100.0))
+
+        # Resumed on fewer phases: 4.0 kW at 16 A
+        load.current_switch_state = "on"
+        load.current_power_kw = 4.0
+        run(coordinator._async_update_vehicle_trim(3000.0))
+        assert load.vehicle_power_per_ampere == pytest.approx(6.3 / 16)
+        run(coordinator._async_update_vehicle_trim(3060.0))
+
+        assert load.vehicle_power_per_ampere == pytest.approx(4.0 / 16)
+
+    def test_rate_is_measured_again_after_a_current_change(self, coordinator):
+        load = coordinator.loads[0]
+        load.current_power_kw = 6.8
+        run(coordinator._async_update_vehicle_trim(1000.0))
+        run(coordinator._async_update_vehicle_trim(1070.0))
+        assert load.vehicle_power_per_ampere == pytest.approx(6.8 / 16)
+
+        # Lowered to 8 A, the vehicle draws far less per ampere
+        session = coordinator._trim_sessions["EV"]
+        session.ampere = 8.0
+        session.changed_time = 1100.0
+        load.current_power_kw = 2.4
+        run(coordinator._async_update_vehicle_trim(1130.0))
+        assert load.vehicle_power_per_ampere == pytest.approx(6.8 / 16)
+        run(coordinator._async_update_vehicle_trim(1160.0))
+
+        assert load.vehicle_power_per_ampere == pytest.approx(2.4 / 8)
+
+    def test_stretch_drawing_more_than_the_last_is_taken_at_its_draw(
+        self, coordinator
+    ):
+        load = coordinator.loads[0]
+        load.current_power_kw = 4.6
+        run(coordinator._async_update_vehicle_trim(1000.0))
+        run(coordinator._async_update_vehicle_trim(1070.0))
+        load.current_switch_state = "off"
+        load.current_power_kw = 0.0
+        run(coordinator._async_update_vehicle_trim(1100.0))
+
+        load.current_switch_state = "on"
+        load.current_power_kw = 9.0
+        run(coordinator._async_update_vehicle_trim(3000.0))
+
+        assert load.vehicle_power_per_ampere == pytest.approx(9.0 / 16)
+
+    def test_current_change_holds_decisions_while_the_vehicle_follows(
+        self, coordinator
+    ):
+        load = coordinator.loads[0]
+        run(coordinator._async_update_vehicle_trim(1000.0))
+        run(coordinator._async_set_vehicle_ampere(load, 8))
+        changed = coordinator._trim_sessions["EV"].changed_time
+
+        run(coordinator._async_update_vehicle_trim(changed + 30))
+
+        assert load.vehicle_settle_until == pytest.approx(changed + 60)
+
+    def test_start_holds_decisions_while_the_vehicle_ramps_up(self, coordinator):
+        load = coordinator.loads[0]
+
+        run(coordinator._async_update_vehicle_trim(1000.0))
+
+        assert load.vehicle_settle_until == pytest.approx(1060.0)
 
     def test_unplug_restores_lowered_current(self, coordinator):
         load = coordinator.loads[0]
