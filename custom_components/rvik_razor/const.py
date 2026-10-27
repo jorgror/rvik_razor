@@ -76,6 +76,9 @@ TRIM_FOLLOW_HOLD = 60  # seconds to let the vehicle follow a new current or star
 TRIM_RAISE_CONFIRM = 60  # seconds a raise must keep fitting before it is sent
 TRIM_END_OF_HOUR = 600  # seconds before the hour ends when cuts go 1 A deeper
 TRIM_RAISE_HEADROOM = 1  # amperes left spare when raising
+TRIM_START_TRANSIENT = 120  # seconds a restart draws at the last current before trim
+TRIM_START_HEADROOM = 2  # amperes above the minimum that must fit for a reduced restart
+TRIM_START_CONFIRM = 180  # seconds a reduced restart must keep fitting before it starts
 TRIM_STORAGE_VERSION = 1  # Vehicle trim state kept across restarts
 TRIM_SAVE_DELAY = 10  # seconds to batch writes of the vehicle trim state
 
@@ -156,6 +159,10 @@ class Load:
     vehicle_power_per_ampere: float | None = None
     vehicle_settle_until: float = 0.0  # No trim or stop while the vehicle follows
     vehicle_raise_fits_since: float | None = None  # When a raise first fitted
+    # A vehicle is bound and its current can be trimmed once it charges, so the
+    # load may restart at a reduced current.
+    vehicle_trim_ready: bool = False
+    vehicle_start_fits_since: float | None = None  # When a reduced restart first fitted
 
     def to_dict(self) -> dict[str, Any]:
         """Convert load to dictionary for storage."""

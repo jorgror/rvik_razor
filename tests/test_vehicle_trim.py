@@ -253,6 +253,63 @@ class TestTrimDecision:
         assert decide([measured], **kwargs)["action"] == "restore"
         assert decide([unmeasured], **kwargs)["action"] == "none"
 
+    def paused(self, **kwargs) -> Load:
+        """A paused charger with a bound vehicle at 0.39 kW/A, 6-14 A."""
+        defaults = dict(
+            assumed_power_kw=11.0,
+            current_switch_state="off",
+            current_power_kw=0.0,
+            vehicle_ampere=None,
+            vehicle_power_per_ampere=0.39,
+            vehicle_min_ampere=6,
+            vehicle_max_ampere=14,
+            vehicle_trim_ready=True,
+        )
+        defaults.update(kwargs)
+        return create_trim_load(**defaults)
+
+    def test_restarts_at_reduced_current_once_it_fits_for_three_minutes(self):
+        # 4.5 kW available for half an hour: 14 A (5.5 kW) does not fit, 8 A does.
+        load = self.paused()
+        kwargs = dict(current_hour_kwh=2.05, house_power_kw=1.0, remaining_seconds=1800)
+
+        first = decide([load], current_time=1000.0, **kwargs)
+        confirmed = decide([load], current_time=1180.0, **kwargs)
+
+        assert first["action"] == "none"
+        assert confirmed["action"] == "restore"
+        assert confirmed["loads_to_restore"][0]["new_value"] == "on"
+        assert "reduced current" in confirmed["reason"]
+
+    def test_reduced_restart_confirmation_starts_over_when_the_room_goes(self):
+        load = self.paused()
+        kwargs = dict(house_power_kw=1.0, remaining_seconds=1800)
+
+        decide([load], current_hour_kwh=2.05, current_time=1000.0, **kwargs)
+        decide([load], current_hour_kwh=3.0, current_time=1090.0, **kwargs)
+        decision = decide([load], current_hour_kwh=2.05, current_time=1180.0, **kwargs)
+
+        assert decision["action"] == "none"
+
+    def test_waits_for_full_power_without_a_vehicle_to_trim(self):
+        load = self.paused(vehicle_trim_ready=False)
+        kwargs = dict(current_hour_kwh=2.05, house_power_kw=1.0, remaining_seconds=1800)
+
+        decide([load], current_time=1000.0, **kwargs)
+        decision = decide([load], current_time=1180.0, **kwargs)
+
+        assert decision["action"] == "none"
+
+    def test_reduced_restart_leaves_room_for_the_ramp_at_full_power(self):
+        # 3.8 kW covers 8 A plus the start slack, but not two minutes at 14 A.
+        load = self.paused()
+        kwargs = dict(current_hour_kwh=2.4, house_power_kw=1.0, remaining_seconds=1800)
+
+        decide([load], current_time=1000.0, **kwargs)
+        decision = decide([load], current_time=1180.0, **kwargs)
+
+        assert decision["action"] == "none"
+
     def test_vehicle_entities_round_trip_through_config(self):
         load = create_trim_load()
 
@@ -323,12 +380,15 @@ class FakeHass:
         self.states = self
         self.services = self
         self._states = states
+        self.refreshed: dict[str, FakeState] = {}  # States a refresh brings
 
     def get(self, entity_id: str) -> FakeState | None:
         return self._states.get(entity_id)
 
     async def async_call(self, domain, service, data, blocking=False):
         self.calls.append((domain, service, data))
+        if service == "update_entity":
+            self._states.update(self.refreshed)
 
 
 class FakeStore:
@@ -588,6 +648,26 @@ class TestTrimSession:
 
         assert load.vehicle_settle_until == pytest.approx(changed + 60)
 
+    def test_paused_bound_vehicle_is_ready_for_a_reduced_restart(self, coordinator):
+        load = coordinator.loads[0]
+        run(coordinator._async_update_vehicle_trim(1000.0))
+        load.current_switch_state = "off"
+        load.current_power_kw = 0.0
+
+        run(coordinator._async_update_vehicle_trim(1030.0))
+
+        assert load.vehicle_trim_ready
+        assert load.vehicle_ampere is None
+
+    def test_used_budget_rules_out_a_reduced_restart(self, coordinator):
+        load = coordinator.loads[0]
+        run(coordinator._async_update_vehicle_trim(1000.0))
+        coordinator._trim_commands_today = 10_000
+
+        run(coordinator._async_update_vehicle_trim(1030.0))
+
+        assert not load.vehicle_trim_ready
+
     def test_start_holds_decisions_while_the_vehicle_ramps_up(self, coordinator):
         load = coordinator.loads[0]
 
@@ -610,6 +690,54 @@ class TestTrimSession:
             ("number", "set_value", {"entity_id": CAR_A, "value": 16})
         ]
         assert coordinator._trim_sessions["EV"].ampere_entity_id is None
+
+
+class TestStaleRange:
+    """Test a charge-current range left stale by a refresh while paused."""
+
+    def bound(self, coordinator):
+        """Car A bound and measured, then left with a stale 0-5 A range."""
+        load = coordinator.loads[0]
+        run(coordinator._async_update_vehicle_trim(1000.0))
+        run(coordinator._async_update_vehicle_trim(1070.0))
+        coordinator.hass._states[CAR_A] = FakeState("5", {"min": 0, "max": 5})
+        coordinator.hass.calls.clear()
+        return load
+
+    def test_refreshes_a_stale_range_before_the_command(self, coordinator):
+        load = self.bound(coordinator)
+        coordinator.hass.refreshed = {CAR_A: FakeState("16", {"min": 0, "max": 32})}
+
+        assert run(coordinator._async_set_vehicle_ampere(load, 6))
+        assert coordinator.hass.calls == [
+            ("homeassistant", "update_entity", {"entity_id": [CAR_A]}),
+            ("number", "set_value", {"entity_id": CAR_A, "value": 6}),
+        ]
+
+    def test_range_still_too_low_keeps_the_rate_for_on_off(self, coordinator):
+        load = self.bound(coordinator)
+
+        assert not run(coordinator._async_set_vehicle_ampere(load, 6))
+        load.current_switch_state = "off"
+        load.current_power_kw = 0.0
+        run(coordinator._async_update_vehicle_trim(1100.0))
+
+        assert ("number", "set_value", {"entity_id": CAR_A, "value": 6}) not in (
+            coordinator.hass.calls
+        )
+        assert load.vehicle_power_per_ampere == pytest.approx(6.3 / 16)
+        assert not load.vehicle_trim_ready
+        assert coordinator._trim_commands_today == 0
+
+    def test_vehicle_is_found_again_at_its_next_charging_stretch(self, coordinator):
+        load = self.bound(coordinator)
+        run(coordinator._async_set_vehicle_ampere(load, 6))
+        coordinator.hass._states[CAR_A] = FakeState("16", {"min": 0, "max": 32})
+
+        run(coordinator._async_update_vehicle_trim(1400.0))
+
+        assert load.vehicle_ampere == 16
+        assert load.vehicle_max_ampere == 16
 
 
 class TestTrimRestart:

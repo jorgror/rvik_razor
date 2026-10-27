@@ -131,6 +131,7 @@ A late-hour charger can list the charge-current entities of the vehicles that ch
 - **Raise** it, keeping 1 A spare, only when at least 2 A more has fitted for a minute, and at most every 5 minutes.
 - **Stop** the charger by the late-hour stop rule when even 6 A does not fit, without lowering the current first.
 - **Wait** a minute after each change and after the charger starts, while the vehicle follows. The charger can report its power later than the meter.
+- **Restart** after a stop at a reduced current, once 8 A has fitted until the end of the hour for 3 minutes, instead of waiting for full power. The vehicle is then trimmed as usual.
 
 Vehicles draw very different power per ampere on the same charger, and one vehicle can change rate between charging stretches or after a lower current. On one 3-phase charger, a Tesla drew about 0.67 kW/A after it was plugged in, and about 0.4 kW/A after its first lower current or pause. Once the current has been steady for a minute, RVik Razor measures the bound vehicle's kW per ampere from the charger's power, and measures again after each change. The next start after a pause uses the rate the vehicle last drew. The bound vehicle and its rate are kept across Home Assistant restarts. Until the first measurement, the load's **assumed power** is taken as its power at the maximum current, so set it for the most powerful vehicle (for example 11 kW).
 
@@ -141,6 +142,7 @@ Vehicle commands are billed by Tesla's Fleet API, so:
 - Disable polling on the Tesla Fleet integration (**System options → Enable polling for updates**). RVik Razor refreshes the vehicles only when it needs to.
 - Commands are sent only while the vehicle draws power, so it is awake, and never to a vehicle the integration believes is asleep. A wake is billed far higher than a command.
 - At most 150 commands are sent per day. With real consumption this was about 25–60 a day.
+- A command outside the range Home Assistant last read for the vehicle first refreshes the vehicle. A refresh while the charger is paused can leave a range of 0–5 A. If a command still fails, the load runs on/off at the vehicle's measured power until the vehicle is found again while it charges.
 - If the charger does not follow a lowered current within 2 minutes, RVik Razor assumes the wrong vehicle and keeps on/off control until it is unplugged.
 - A lowered current is set back to 16 A when the vehicle is unplugged, since vehicles remember their current per location.
 
