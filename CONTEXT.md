@@ -39,7 +39,7 @@ Move a load toward lower electrical consumption.
 _Avoid_: Stop, turn off
 
 **Late-hour load**:
-A switch load that runs at the end of each hour instead of being switched to hit the hourly set point. It starts only once it can run at full power until the hour ends.
+A switch load that runs at the end of each hour instead of being switched to hit the hourly set point. It starts only once it can run at full power until the hour ends, or, with vehicle amp trim, once a reduced current fits.
 
 **Vehicle amp trim**:
 Fitting the charge current of the vehicle charging on a late-hour load to the room left in the hour, instead of only switching the charger on and off.

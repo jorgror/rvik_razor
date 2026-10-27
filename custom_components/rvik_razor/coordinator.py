@@ -48,6 +48,9 @@ from .const import (
     TRIM_RAISE_CONFIRM,
     TRIM_RAISE_HEADROOM,
     TRIM_SAVE_DELAY,
+    TRIM_START_CONFIRM,
+    TRIM_START_HEADROOM,
+    TRIM_START_TRANSIENT,
     TRIM_STORAGE_VERSION,
     TRIM_VERIFY_DELAY,
     TRIM_VERIFY_TOLERANCE_KW,
@@ -378,7 +381,9 @@ def _calculate_late_hour_action(
     A late-hour load only starts once it can run at full power until the end of
     the hour, which pushes its consumption late in the hour. It stops when the
     rest of the house no longer leaves room for it, so it stays available to
-    absorb consumption that turns up late in the hour.
+    absorb consumption that turns up late in the hour. A load whose vehicle can
+    be trimmed also restarts once a reduced current has kept fitting, since the
+    trim keeps it able to absorb consumption.
 
     While a vehicle with a known charge current charges on the load, its
     current is fitted to the room instead, and the stop rule applies at the
@@ -430,6 +435,14 @@ def _calculate_late_hour_action(
             "remaining_hours": remaining_hours,
             "hourly_set_point_kwh": hourly_set_point_kwh,
         }
+
+        reduced_start_fits = not running and _fits_reduced_start(
+            load, available_kw, remaining_hours, run_power, start_slack_kw
+        )
+        if not reduced_start_fits:
+            load.vehicle_start_fits_since = None
+        elif load.vehicle_start_fits_since is None:
+            load.vehicle_start_fits_since = current_time
 
         trimmed = running and load.vehicle_ampere is not None
         if not trimmed:
@@ -532,6 +545,28 @@ def _calculate_late_hour_action(
                     ),
                 }
             )
+        elif (
+            reduced_start_fits
+            and current_time - load.vehicle_start_fits_since >= TRIM_START_CONFIRM
+        ):
+            starts.append(
+                {
+                    **_build_horizon_plan(
+                        **plan_args,
+                        candidate_load_power_kw=(
+                            load.vehicle_min_ampere + TRIM_START_HEADROOM
+                        )
+                        * load.vehicle_power_per_ampere,
+                        new_value=consuming_state,
+                        reduction_kw=0.0,
+                    ),
+                    "direction": "restore",
+                    "reason": (
+                        f"Late-hour start {load.name} at reduced current: "
+                        f"{available_kw:.2f}kW available until end of hour"
+                    ),
+                }
+            )
         else:
             statuses.append(
                 f"Waiting to start {load.name} late in hour "
@@ -553,6 +588,34 @@ def _calculate_late_hour_action(
     return None, "; ".join(statuses)
 
 
+def _fits_reduced_start(
+    load: Load,
+    available_kw: float,
+    remaining_hours: float,
+    run_power: float,
+    start_slack_kw: float,
+) -> bool:
+    """Return True if a vehicle that can be trimmed fits at a reduced current.
+
+    The reduced current keeps some amperes above the minimum, so a small rise in
+    the rest of the house is trimmed rather than stopping the charger. The
+    vehicle first draws at the current it was last set to, taken as full
+    power, until it has ramped up and its current is trimmed.
+    """
+    if not (load.vehicle_trim_ready and load.vehicle_power_per_ampere):
+        return False
+    minimum_kw = (
+        load.vehicle_min_ampere + TRIM_START_HEADROOM
+    ) * load.vehicle_power_per_ampere
+    transient_hours = min(remaining_hours, TRIM_START_TRANSIENT / 3600.0)
+    needed_kwh = (
+        run_power * transient_hours
+        + minimum_kw * (remaining_hours - transient_hours)
+        + start_slack_kw * remaining_hours
+    )
+    return available_kw * remaining_hours >= needed_kwh
+
+
 def _vehicle_power_per_ampere(load: Load) -> float:
     """Estimate kW per ampere for a vehicle charging on a late-hour load.
 
@@ -568,6 +631,18 @@ def _vehicle_power_per_ampere(load: Load) -> float:
     if load.current_power_kw and load.vehicle_ampere:
         return load.current_power_kw / load.vehicle_ampere
     return 0.0
+
+
+def _ampere_in_range(state: Any, ampere: float) -> bool:
+    """Return True if a charge-current entity's range allows the current."""
+    if state is None:
+        return False
+    try:
+        minimum = float(state.attributes.get("min", FALLBACK_MIN_AMPERE))
+        maximum = float(state.attributes.get("max", FALLBACK_MAX_AMPERE))
+    except (TypeError, ValueError):
+        return True
+    return minimum <= ampere <= maximum
 
 
 def _session_power_per_ampere(session: VehicleTrimSession) -> float:
@@ -1242,6 +1317,7 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for load in self.loads:
             load.vehicle_ampere = None
             load.vehicle_power_per_ampere = None
+            load.vehicle_trim_ready = False
             if not (
                 load.enabled
                 and _is_late_hour_load(load)
@@ -1276,6 +1352,13 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ):
                     await self._async_identify_vehicle(load, session, now)
                 if session.ampere_entity_id is None:
+                    # After a failed command the same vehicle is still plugged
+                    # in, so its rate still predicts the power of a start.
+                    if not session.failed and (
+                        rate := _session_power_per_ampere(session)
+                    ):
+                        load.vehicle_power_per_ampere = rate
+                        load.vehicle_max_ampere = session.max_ampere
                     continue
 
             if session.verify_after is not None and now >= session.verify_after:
@@ -1328,10 +1411,11 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             load.vehicle_min_ampere = session.min_ampere
             load.vehicle_max_ampere = session.max_ampere
 
-            if not charging:
-                continue
             if self._trim_commands_today >= DEFAULT_TRIM_DAILY_COMMAND_BUDGET:
                 session.status = "Daily vehicle command budget used"
+                continue
+            load.vehicle_trim_ready = True
+            if not charging:
                 continue
 
             load.vehicle_ampere = session.ampere
@@ -1406,6 +1490,33 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             session.status = "Vehicle is asleep; not sending a command"
             return False
 
+        # Home Assistant only accepts a current within the range of the last
+        # refresh. A refresh while the charger was paused, as at a restart,
+        # can leave a range below the current the vehicle charges at.
+        state = self.hass.states.get(session.ampere_entity_id)
+        if not _ampere_in_range(state, target):
+            try:
+                await self.hass.services.async_call(
+                    "homeassistant",
+                    "update_entity",
+                    {"entity_id": [session.ampere_entity_id]},
+                    blocking=True,
+                )
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning(
+                    "Could not refresh %s: %s", session.ampere_entity_id, err
+                )
+            state = self.hass.states.get(session.ampere_entity_id)
+            if not _ampere_in_range(state, target):
+                limits = state.attributes if state is not None else {}
+                self._drop_vehicle_after_failure(
+                    session,
+                    target,
+                    f"{target}A is outside the range "
+                    f"{limits.get('min')} - {limits.get('max')}",
+                )
+                return False
+
         self._trim_commands_today += 1
         try:
             await self.hass.services.async_call(
@@ -1415,15 +1526,7 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 blocking=True,
             )
         except Exception as err:  # noqa: BLE001
-            _LOGGER.warning(
-                "Failed to set %s to %sA: %s; using on/off control until unplugged",
-                session.ampere_entity_id,
-                target,
-                err,
-            )
-            session.ampere_entity_id = None
-            session.failed = True
-            session.status = f"Charge current command failed: {err}"
+            self._drop_vehicle_after_failure(session, target, str(err))
             return False
 
         previous = session.ampere
@@ -1443,6 +1546,24 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "Set %s charge current %.0fA -> %dA", load.name, previous, target
         )
         return True
+
+    def _drop_vehicle_after_failure(
+        self, session: VehicleTrimSession, target: int, error: str
+    ) -> None:
+        """Run the load on/off after a failed command until the vehicle is found again.
+
+        The vehicle is found again with a fresh refresh while it charges, within
+        the identification attempts left for this plug-in.
+        """
+        _LOGGER.warning(
+            "Failed to set %s to %sA: %s; using on/off control until the "
+            "vehicle is found again",
+            session.ampere_entity_id,
+            target,
+            error,
+        )
+        session.ampere_entity_id = None
+        session.status = f"Charge current command failed: {error}"
 
     async def _async_end_trim_session(
         self, load: Load, session: VehicleTrimSession
