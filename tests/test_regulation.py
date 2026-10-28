@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import time
 
 import pytest
@@ -127,13 +128,13 @@ class TestPowerPerAmpere:
 class TestHorizonRegulationDecisions:
     """Test projection-based horizon set-point control."""
 
-    def test_no_action_within_accuracy_deadband(self):
+    def test_no_action_while_switch_loads_fit(self):
         load = create_test_load(current_switch_state="on")
 
-        decision = decide([load], current_hour_kwh=4.99, house_power_kw=0.0)
+        decision = decide([load], current_hour_kwh=3.9, house_power_kw=2.0)
 
         assert decision["action"] == "none"
-        assert "deadband" in decision["reason"]
+        assert "stay as they are" in decision["reason"]
 
     def test_no_control_without_house_power(self):
         load = create_test_load(current_switch_state="on")
@@ -166,7 +167,7 @@ class TestHorizonRegulationDecisions:
         assert decision["loads_to_reduce"][0]["new_value"] == "off"
         assert decision["candidate_projected_end_kwh"] == pytest.approx(5.0)
 
-    def test_bad_fit_at_first_eligible_reduce_priority_waits(self):
+    def test_first_priority_load_stays_on_while_the_hour_holds_without_it(self):
         loads = [
             create_test_load(
                 name="Priority 1",
@@ -185,8 +186,7 @@ class TestHorizonRegulationDecisions:
         decision = decide(loads, current_hour_kwh=4.0, house_power_kw=2.2)
 
         assert decision["action"] == "none"
-        assert "Priority 1" in decision["reason"]
-        assert "waiting" in decision["reason"]
+        assert "Keeping Priority 1 on" in decision["reason"]
 
     def test_cooldown_is_ineligible_and_next_priority_can_reduce(self):
         now = time.time()
@@ -224,7 +224,7 @@ class TestHorizonRegulationDecisions:
         decision = decide([load], current_hour_kwh=4.0, house_power_kw=3.0)
 
         assert decision["action"] == "none"
-        assert "No eligible loads" in decision["reason"]
+        assert "No switch load drawing power" in decision["reason"]
 
     def test_restore_highest_priority_load_when_it_improves_accuracy(self):
         loads = [
@@ -249,7 +249,7 @@ class TestHorizonRegulationDecisions:
         assert decision["loads_to_restore"][0]["new_value"] == "on"
         assert decision["candidate_projected_end_kwh"] == pytest.approx(5.0)
 
-    def test_bad_fit_at_first_eligible_restore_priority_waits(self):
+    def test_first_restore_priority_stays_off_until_there_is_room(self):
         loads = [
             create_test_load(
                 name="High",
@@ -265,11 +265,10 @@ class TestHorizonRegulationDecisions:
             ),
         ]
 
-        decision = decide(loads, current_hour_kwh=4.0, house_power_kw=1.0)
+        decision = decide(loads, current_hour_kwh=4.4, house_power_kw=1.0)
 
         assert decision["action"] == "none"
-        assert "High" in decision["reason"]
-        assert "waiting" in decision["reason"]
+        assert "Keeping High off" in decision["reason"]
 
     def test_inverted_switch_reduce_turns_on(self):
         load = create_test_load(
@@ -617,7 +616,7 @@ class TestLateHourLoads:
 
         assert decision["action"] == "none"
 
-    def test_other_loads_use_horizon_control_around_running_late_load(self):
+    def test_running_late_load_is_left_to_its_own_rule(self):
         late = create_late_load(current_switch_state="on", current_power_kw=4.0)
         heater = create_test_load(
             name="Heater",
@@ -634,8 +633,9 @@ class TestLateHourLoads:
             remaining_seconds=360,
         )
 
-        assert decision["action"] == "reduce"
-        assert decision["loads_to_reduce"][0]["load"].name == "Heater"
+        # The late-hour load runs within its own stop tolerance, and the
+        # heater is not cut to make room for it.
+        assert decision["action"] == "none"
 
     def test_late_in_hour_round_trips_through_config(self):
         load = create_late_load()
@@ -643,6 +643,224 @@ class TestLateHourLoads:
         assert Load.from_dict(load.to_dict()).late_in_hour is True
         default = Load.from_dict({"name": "X", "type": "switch", "priority": 1})
         assert default.late_in_hour is False
+
+
+def create_heater(**kwargs) -> Load:
+    """Create a 2 kW water heater that is on and drawing power."""
+    defaults = {
+        "name": "Heater",
+        "priority": 10,
+        "current_switch_state": "on",
+        "current_power_kw": 2.0,
+        "timeout": 300,
+    }
+    defaults.update(kwargs)
+    return create_test_load(**defaults)
+
+
+class TestSwitchLoadsCutOnlyWhenNeeded:
+    """Test that switch loads are cut only when the hour cannot hold without them."""
+
+    def test_brief_spike_early_in_the_hour_keeps_the_heater_on(self):
+        heater = create_heater()
+
+        # 7 kW now, but the rest of the house averaged 3 kW over 5 minutes.
+        decision = decide(
+            [heater],
+            current_hour_kwh=0.3,
+            house_power_kw=7.0,
+            set_point_kwh=4.8,
+            remaining_seconds=3300,
+            uncontrolled_power_kw=3.0,
+        )
+
+        assert decision["action"] == "none"
+        assert "Keeping Heater on" in decision["reason"]
+
+    def test_lasting_high_load_cuts_the_heater_early(self):
+        heater = create_heater()
+
+        decision = decide(
+            [heater],
+            current_hour_kwh=0.3,
+            house_power_kw=7.0,
+            set_point_kwh=4.8,
+            remaining_seconds=3300,
+            uncontrolled_power_kw=5.0,
+        )
+
+        assert decision["action"] == "reduce"
+        assert decision["loads_to_reduce"][0]["load"].name == "Heater"
+        assert decision["candidate_projected_end_kwh"] == pytest.approx(
+            0.3 + 5.0 * 3300 / 3600
+        )
+
+    def test_load_that_just_stopped_does_not_cut_the_heater(self):
+        heater = create_heater()
+
+        # The last five minutes averaged 6 kW, but the rest of the house is
+        # down to 1 kW now.
+        decision = decide(
+            [heater],
+            current_hour_kwh=0.1,
+            house_power_kw=3.0,
+            set_point_kwh=4.8,
+            remaining_seconds=3500,
+            uncontrolled_power_kw=6.0,
+        )
+
+        assert decision["action"] == "none"
+
+    def test_brief_dip_does_not_restore_the_heater(self):
+        heater = create_heater(current_switch_state="off", current_power_kw=0.0)
+
+        decision = decide(
+            [heater],
+            current_hour_kwh=3.0,
+            house_power_kw=1.0,
+            set_point_kwh=4.8,
+            remaining_seconds=1800,
+            uncontrolled_power_kw=3.4,
+        )
+
+        assert decision["action"] == "none"
+        assert "Keeping Heater off" in decision["reason"]
+
+    def test_heater_is_cut_late_in_the_hour_once_it_is_needed(self):
+        heater = create_heater()
+
+        kept = decide(
+            [heater],
+            current_hour_kwh=4.3,
+            house_power_kw=4.0,
+            set_point_kwh=4.8,
+            remaining_seconds=600,
+        )
+        cut = decide(
+            [heater],
+            current_hour_kwh=4.4,
+            house_power_kw=4.0,
+            set_point_kwh=4.8,
+            remaining_seconds=600,
+        )
+
+        assert kept["action"] == "none"
+        assert cut["action"] == "reduce"
+
+    def test_heater_drawing_nothing_is_not_cut(self):
+        heater = create_heater(current_power_kw=0.0)
+
+        decision = decide(
+            [heater],
+            current_hour_kwh=2.0,
+            house_power_kw=8.0,
+            set_point_kwh=4.8,
+            remaining_seconds=1800,
+        )
+
+        assert decision["action"] == "none"
+        assert "No switch load drawing power" in decision["reason"]
+
+    def test_idle_first_priority_passes_the_cut_to_the_next_load(self):
+        idle = create_heater(name="Idle", priority=1, current_power_kw=0.0)
+        heat_pump = create_heater(name="Heat pump", priority=5)
+
+        decision = decide(
+            [idle, heat_pump],
+            current_hour_kwh=2.0,
+            house_power_kw=8.0,
+            set_point_kwh=4.8,
+            remaining_seconds=1800,
+        )
+
+        assert decision["action"] == "reduce"
+        assert decision["loads_to_reduce"][0]["load"].name == "Heat pump"
+
+    def test_running_late_load_is_cut_before_the_heater(self):
+        late = create_late_load(current_switch_state="on", current_power_kw=5.5)
+        heater = create_heater()
+
+        decision = decide(
+            [late, heater],
+            current_hour_kwh=2.5,
+            house_power_kw=9.5,
+            set_point_kwh=4.8,
+            remaining_seconds=1800,
+            current_time=10_000.0,
+        )
+
+        assert decision["action"] == "reduce"
+        assert decision["loads_to_reduce"][0]["load"].name == "EV"
+
+    def test_heater_is_restored_once_the_hour_holds_without_it(self):
+        heater = create_heater(current_switch_state="off", current_power_kw=0.0)
+
+        restored = decide(
+            [heater],
+            current_hour_kwh=3.0,
+            house_power_kw=2.8,
+            set_point_kwh=4.8,
+            remaining_seconds=1800,
+        )
+        kept_off = decide(
+            [heater],
+            current_hour_kwh=3.0,
+            house_power_kw=3.4,
+            set_point_kwh=4.8,
+            remaining_seconds=1800,
+        )
+
+        assert restored["action"] == "restore"
+        assert restored["loads_to_restore"][0]["new_value"] == "on"
+        assert kept_off["action"] == "none"
+        assert "Keeping Heater off" in kept_off["reason"]
+
+    def test_heater_in_cooldown_is_left_alone(self):
+        now = 10_000.0
+        heater = create_heater(current_switch_state="off", last_action_time=now - 60)
+
+        decision = decide(
+            [heater],
+            current_hour_kwh=1.0,
+            house_power_kw=1.0,
+            set_point_kwh=4.8,
+            remaining_seconds=1800,
+            current_time=now,
+        )
+
+        assert decision["action"] == "none"
+
+
+class TestUncontrolledPowerAverage:
+    """Test the averaged house power that switch loads are judged on."""
+
+    def coordinator(self, loads):
+        coordinator = RvikRazorCoordinator.__new__(RvikRazorCoordinator)
+        coordinator.loads = loads
+        coordinator._uncontrolled_samples = deque()
+        return coordinator
+
+    def test_leaves_out_controlled_loads(self):
+        late = create_late_load(current_switch_state="on", current_power_kw=5.5)
+        heater = create_heater()
+        coordinator = self.coordinator([late, heater])
+
+        coordinator._record_uncontrolled_power(1000.0, 9.0)
+
+        assert coordinator._uncontrolled_average() == pytest.approx(1.5)
+
+    def test_averages_the_last_five_minutes(self):
+        coordinator = self.coordinator([])
+
+        coordinator._record_uncontrolled_power(1000.0, 9.0)
+        for now in range(1030, 1360, 30):
+            coordinator._record_uncontrolled_power(float(now), 1.0)
+
+        # The 9 kW sample is older than five minutes and has dropped out.
+        assert coordinator._uncontrolled_average() == pytest.approx(1.0)
+
+    def test_no_samples_falls_back_to_the_current_power(self):
+        assert self.coordinator([])._uncontrolled_average() is None
 
 
 class FakeState:

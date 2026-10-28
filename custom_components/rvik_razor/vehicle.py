@@ -132,6 +132,28 @@ def find_vehicle_entities(
     }
 
 
+def find_charger_energy_entities(
+    hass: HomeAssistant, switch_entity_id: str
+) -> list[str]:
+    """Return the energy sensors on the device of a charger's switch.
+
+    A charger's session energy starts again at a new plug-in. Its lifetime
+    energy meter never goes down, so watching every energy sensor for a drop
+    needs no knowledge of the charger integration.
+    """
+    registry = er.async_get(hass)
+    entry = registry.async_get(switch_entity_id)
+    if entry is None or entry.device_id is None:
+        return []
+    return [
+        sibling.entity_id
+        for sibling in er.async_entries_for_device(registry, entry.device_id)
+        if sibling.domain == "sensor"
+        and (sibling.device_class or sibling.original_device_class) == "energy"
+        and not sibling.disabled_by
+    ]
+
+
 def read_vehicle_snapshot(
     hass: HomeAssistant,
     ampere_entity_id: str,

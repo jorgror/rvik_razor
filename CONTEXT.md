@@ -34,6 +34,15 @@ _Avoid_: Restore margin
 **Control direction**:
 Whether the current cycle is trying to reduce or restore consumption based on the projection relative to the hourly set point.
 
+**Set-point switch load**:
+A switch load, such as a water heater or heat pump, that stays on unless the hour cannot be held without it. It is cut only when the hour, without it, would still end within a small margin of the hourly set point.
+
+**Uncontrolled power**:
+The house power drawn by everything except late-hour loads and set-point switch loads. Set-point switch loads are judged on it both now and averaged over a few minutes.
+
+**Replug**:
+A vehicle unplugged and plugged in again between two reports of the charger, so the charger switch never shows the unplug. RVik Razor notices it from the charger's session energy starting again.
+
 **Reduce**:
 Move a load toward lower electrical consumption.
 _Avoid_: Stop, turn off

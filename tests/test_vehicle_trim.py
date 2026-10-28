@@ -25,6 +25,7 @@ from custom_components.rvik_razor.vehicle import (
 
 CAR_A = "number.car_a_charge_current"
 CAR_B = "number.car_b_charge_current"
+SESSION_ENERGY = "sensor.charger_session_energy"
 
 
 def create_trim_load(**kwargs) -> Load:
@@ -434,9 +435,17 @@ def coordinator(monkeypatch):
     monkeypatch.setattr(
         coordinator_module, "find_vehicle_entities", fake_find_vehicle_entities
     )
+    monkeypatch.setattr(
+        coordinator_module,
+        "find_charger_energy_entities",
+        lambda hass, switch_entity_id: [SESSION_ENERGY],
+    )
+    # Most tests bind on the first update; TestSteadyBinding covers the wait.
+    monkeypatch.setattr(coordinator_module, "TRIM_IDENTIFY_SETTLE", 0)
     coord = RvikRazorCoordinator.__new__(RvikRazorCoordinator)
     coord.last_action = ""
     coord.last_action_reason = ""
+    coord._charger_energy = {}
     coord._trim_sessions = {}
     coord._trim_commands_today = 0
     coord._trim_budget_day = date.today()
@@ -692,6 +701,106 @@ class TestTrimSession:
         assert coordinator._trim_sessions["EV"].ampere_entity_id is None
 
 
+class TestSteadyBinding:
+    """Test that the vehicle is looked for once the charger's power has settled."""
+
+    def test_waits_a_minute_of_charging_before_the_refresh(
+        self, coordinator, monkeypatch
+    ):
+        monkeypatch.setattr(coordinator_module, "TRIM_IDENTIFY_SETTLE", 60)
+        load = coordinator.loads[0]
+
+        run(coordinator._async_update_vehicle_trim(1000.0))
+        run(coordinator._async_update_vehicle_trim(1030.0))
+        assert coordinator.hass.calls == []
+
+        run(coordinator._async_update_vehicle_trim(1060.0))
+        assert coordinator.hass.calls == [
+            ("homeassistant", "update_entity", {"entity_id": [CAR_A, CAR_B]})
+        ]
+        assert coordinator._trim_sessions["EV"].ampere_entity_id == CAR_A
+        assert coordinator._trim_sessions["EV"].attempts == 1
+        assert load.vehicle_ampere == 16
+
+    def test_a_stop_before_the_minute_starts_the_wait_again(
+        self, coordinator, monkeypatch
+    ):
+        monkeypatch.setattr(coordinator_module, "TRIM_IDENTIFY_SETTLE", 60)
+        load = coordinator.loads[0]
+
+        run(coordinator._async_update_vehicle_trim(1000.0))
+        load.current_power_kw = 0.0
+        run(coordinator._async_update_vehicle_trim(1030.0))
+        load.current_power_kw = 6.3
+        run(coordinator._async_update_vehicle_trim(1060.0))
+
+        assert coordinator.hass.calls == []
+
+
+class TestReplug:
+    """Test noticing a replug that the charger switch never showed."""
+
+    def session_energy(self, coordinator, kwh):
+        coordinator.hass._states[SESSION_ENERGY] = FakeState(
+            str(kwh), {"unit_of_measurement": "kWh"}
+        )
+
+    def test_new_session_forgets_a_failed_vehicle(self, coordinator):
+        load = coordinator.loads[0]
+        self.session_energy(coordinator, 8.9)
+        run(coordinator._async_update_vehicle_trim(1000.0))
+        session = coordinator._trim_sessions["EV"]
+        session.ampere_entity_id = None
+        session.failed = True
+        coordinator.hass.calls.clear()
+
+        self.session_energy(coordinator, 0.7)
+        run(coordinator._async_update_vehicle_trim(1030.0))
+
+        session = coordinator._trim_sessions["EV"]
+        assert not session.failed
+        assert session.ampere_entity_id == CAR_A
+        assert session.attempts == 1
+        assert load.vehicle_ampere == 16
+
+    def test_replug_leaves_a_lowered_current_for_trim(self, coordinator):
+        load = coordinator.loads[0]
+        self.session_energy(coordinator, 8.9)
+        run(coordinator._async_update_vehicle_trim(1000.0))
+        run(coordinator._async_set_vehicle_ampere(load, 8))
+        coordinator.hass._states[CAR_A] = FakeState("8", {"min": 0, "max": 32})
+        coordinator.hass.calls.clear()
+
+        self.session_energy(coordinator, 0.7)
+        run(coordinator._async_update_vehicle_trim(1400.0))
+
+        # Refreshed and bound again, but no command to set 16 A.
+        assert ("number", "set_value", {"entity_id": CAR_A, "value": 16}) not in (
+            coordinator.hass.calls
+        )
+        assert coordinator._trim_sessions["EV"].ampere_entity_id == CAR_A
+        assert load.vehicle_ampere == 8
+
+    def test_small_correction_of_session_energy_is_not_a_replug(self, coordinator):
+        self.session_energy(coordinator, 2.32)
+        run(coordinator._async_update_vehicle_trim(1000.0))
+        bound_time = coordinator._trim_sessions["EV"].bound_time
+
+        self.session_energy(coordinator, 2.12)
+        run(coordinator._async_update_vehicle_trim(1030.0))
+
+        assert coordinator._trim_sessions["EV"].bound_time == bound_time
+
+    def test_first_reading_after_a_restart_is_not_a_replug(self, coordinator):
+        self.session_energy(coordinator, 0.7)
+        run(coordinator._async_update_vehicle_trim(1000.0))
+        bound_time = coordinator._trim_sessions["EV"].bound_time
+
+        run(coordinator._async_update_vehicle_trim(1030.0))
+
+        assert coordinator._trim_sessions["EV"].bound_time == bound_time
+
+
 class TestStaleRange:
     """Test a charge-current range left stale by a refresh while paused."""
 
@@ -747,6 +856,7 @@ class TestTrimRestart:
         """A new coordinator restored from what the old one saved."""
         new = RvikRazorCoordinator.__new__(RvikRazorCoordinator)
         new.last_action = new.last_action_reason = ""
+        new._charger_energy = {}
         new._trim_sessions = {}
         new._trim_commands_today = 0
         new._trim_budget_day = date.today()
