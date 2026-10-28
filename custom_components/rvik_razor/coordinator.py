@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from datetime import date, datetime, timedelta
 import logging
 import math
@@ -39,15 +40,21 @@ from .const import (
     Load,
     LoadType,
     OperationMode,
+    SETPOINT_AVERAGE_WINDOW,
+    SETPOINT_CUT_MARGIN_KWH,
+    SETPOINT_IDLE_KW,
+    SETPOINT_RESTORE_MARGIN_KWH,
     TRIM_CHARGING_THRESHOLD_KW,
     TRIM_END_OF_HOUR,
     TRIM_FOLLOW_HOLD,
     TRIM_IDENTIFY_INTERVAL,
     TRIM_IDENTIFY_MAX_ATTEMPTS,
+    TRIM_IDENTIFY_SETTLE,
     TRIM_LEARN_SETTLE,
     TRIM_RAISE_CONFIRM,
     TRIM_RAISE_HEADROOM,
     TRIM_SAVE_DELAY,
+    TRIM_SESSION_RESET_KWH,
     TRIM_START_CONFIRM,
     TRIM_START_HEADROOM,
     TRIM_START_TRANSIENT,
@@ -58,6 +65,7 @@ from .const import (
 from .vehicle import (
     STATUS_KEY,
     VehicleTrimSession,
+    find_charger_energy_entities,
     find_vehicle_entities,
     read_vehicle_snapshot,
     select_charging_vehicle,
@@ -194,14 +202,19 @@ def calculate_regulation_decision(
     trim_margin_kw: float = DEFAULT_TRIM_MARGIN_KW,
     trim_raise_step: float = DEFAULT_TRIM_RAISE_STEP,
     trim_raise_interval: float = DEFAULT_TRIM_RAISE_INTERVAL,
+    uncontrolled_power_kw: float | None = None,
 ) -> dict[str, Any]:
     """Calculate a projection-based regulation action.
 
     Late-hour loads are decided first by their own start/stop rule, which also
-    trims the charge current of a vehicle charging on them. Otherwise
-    the controller chooses direction from the current end-of-hour projection,
-    then evaluates the first eligible load in priority order for that direction.
-    It only acts when that load improves accuracy by more than the deadband.
+    trims the charge current of a vehicle charging on them. Switch loads are
+    then cut only when the hour cannot be held without them, judged on the
+    rest of the house both now and averaged over a few minutes
+    (uncontrolled_power_kw, by default only now).
+    Otherwise the controller chooses direction from the current end-of-hour
+    projection, then evaluates the first eligible ampere load in priority
+    order for that direction. It only acts when that load improves accuracy by
+    more than the deadband.
     """
     remaining_hours = max(0.0, remaining_seconds / 3600.0)
     projected_end_kwh = (
@@ -257,21 +270,201 @@ def calculate_regulation_decision(
             result["loads_to_restore"] = [late_plan]
         return result
 
-    decision = _calculate_horizon_decision(
-        result=result,
-        loads=[
-            load for load in loads if load.enabled and not _is_late_hour_load(load)
-        ],
-        current_hour_kwh=current_hour_kwh,
-        house_power_kw=house_power_kw,
-        hourly_set_point_kwh=hourly_set_point_kwh,
-        remaining_hours=remaining_hours,
-        current_time=current_time,
-        accuracy_deadband_kwh=accuracy_deadband_kwh,
+    reasons = [late_status] if late_status else []
+    switch_loads = [
+        load
+        for load in loads
+        if load.enabled
+        and not _is_late_hour_load(load)
+        and load.load_type == LoadType.SWITCH
+    ]
+    if switch_loads:
+        # A brief spike leaves the average low, and a load that just stopped
+        # leaves the current power low, so cut only when both are high and
+        # restore only when both are low.
+        current_kw = calculate_uncontrolled_power(loads, house_power_kw)
+        averaged_kw = (
+            current_kw if uncontrolled_power_kw is None else uncontrolled_power_kw
+        )
+        switch_kw = sum(_switch_drawing_kw(load) for load in switch_loads)
+        decision = _calculate_switch_decision(
+            result=result,
+            loads=switch_loads,
+            current_hour_kwh=current_hour_kwh,
+            cut_power_kw=min(current_kw, averaged_kw) + switch_kw,
+            restore_power_kw=max(current_kw, averaged_kw) + switch_kw,
+            hourly_set_point_kwh=hourly_set_point_kwh,
+            remaining_hours=remaining_hours,
+            current_time=current_time,
+            accuracy_deadband_kwh=accuracy_deadband_kwh,
+        )
+        if decision["action"] != "none":
+            return decision
+        reasons.append(decision["reason"])
+
+    ampere_loads = [
+        load
+        for load in loads
+        if load.enabled
+        and not _is_late_hour_load(load)
+        and load.load_type != LoadType.SWITCH
+    ]
+    if ampere_loads or not switch_loads:
+        decision = _calculate_horizon_decision(
+            result=result,
+            loads=ampere_loads,
+            current_hour_kwh=current_hour_kwh,
+            house_power_kw=house_power_kw,
+            hourly_set_point_kwh=hourly_set_point_kwh,
+            remaining_hours=remaining_hours,
+            current_time=current_time,
+            accuracy_deadband_kwh=accuracy_deadband_kwh,
+        )
+        if decision["action"] != "none":
+            return decision
+        reasons.append(decision["reason"])
+    result["reason"] = "; ".join(reasons)
+    return result
+
+
+def calculate_uncontrolled_power(loads: list[Load], house_power_kw: float) -> float:
+    """Return the house power drawn by everything RVik Razor does not switch.
+
+    Late-hour loads follow their own rule and switch loads are judged one by
+    one, so both are taken out. What is left is averaged over a few minutes
+    before it is projected to the end of the hour, so a brief spike early in
+    the hour does not cut a load.
+    """
+    controlled_kw = sum(
+        (load.current_power_kw or 0.0)
+        if _is_late_hour_load(load)
+        else _switch_drawing_kw(load)
+        for load in loads
+        if load.enabled
+        and load.load_type == LoadType.SWITCH
     )
-    if decision["action"] == "none" and late_status:
-        decision["reason"] = f"{late_status}; {decision['reason']}"
-    return decision
+    return max(0.0, house_power_kw - controlled_kw)
+
+
+def _switch_drawing_kw(load: Load) -> float:
+    """Return the power a switch load draws now: measured, or assumed when on."""
+    consuming_state = "off" if load.switch_inverted else "on"
+    if load.current_switch_state != consuming_state:
+        return 0.0
+    if load.current_power_kw is not None:
+        return max(0.0, load.current_power_kw)
+    return load.assumed_power_kw or 0.0
+
+
+def _calculate_switch_decision(
+    result: dict[str, Any],
+    loads: list[Load],
+    current_hour_kwh: float,
+    cut_power_kw: float,
+    restore_power_kw: float,
+    hourly_set_point_kwh: float,
+    remaining_hours: float,
+    current_time: float,
+    accuracy_deadband_kwh: float,
+) -> dict[str, Any]:
+    """Cut a switch load only when needed, and restore it once there is room.
+
+    The house power is projected to the end of the hour: cut_power_kw when
+    deciding a cut and restore_power_kw when deciding a restore.
+
+    A load is cut when the hour is projected over the set point and, without
+    that load, would still end within the cut margin of it. Cutting earlier
+    would not be needed if the rest of the house falls back, and cutting then
+    still holds the hour if it does not. A load drawing nothing is not cut.
+    A load is restored once the hour, without it, is projected the restore
+    margin under the set point. Lower priority numbers are cut first and
+    higher numbers restored first, and the first eligible load decides.
+    """
+    projected_kwh = current_hour_kwh + cut_power_kw * remaining_hours
+    ready = [
+        load
+        for load in loads
+        if load.current_switch_state in ("on", "off")
+        and current_time - load.last_action_time >= load.timeout
+    ]
+
+    if projected_kwh > hourly_set_point_kwh + accuracy_deadband_kwh:
+        for load in sorted(ready, key=lambda load: load.priority):
+            power_kw = _switch_drawing_kw(load)
+            if power_kw < SETPOINT_IDLE_KW:
+                continue
+            without_kwh = projected_kwh - power_kw * remaining_hours
+            if without_kwh < hourly_set_point_kwh - SETPOINT_CUT_MARGIN_KWH:
+                result["reason"] = (
+                    f"Keeping {load.name} on: projected {projected_kwh:.2f}kWh, "
+                    f"{without_kwh:.2f}kWh without it"
+                )
+                return result
+            plan = _build_horizon_plan(
+                load=load,
+                plan_type="switch",
+                current_load_power_kw=power_kw,
+                candidate_load_power_kw=0.0,
+                current_hour_kwh=current_hour_kwh,
+                house_power_kw=cut_power_kw,
+                remaining_hours=remaining_hours,
+                hourly_set_point_kwh=hourly_set_point_kwh,
+                new_value="on" if load.switch_inverted else "off",
+                reduction_kw=power_kw,
+            )
+            result["action"] = "reduce"
+            result["candidate_projected_end_kwh"] = without_kwh
+            result["loads_to_reduce"] = [plan]
+            result["remaining_reduction"] = power_kw
+            result["reason"] = (
+                f"Reduce {load.name}: projected {projected_kwh:.2f}kWh, "
+                f"{without_kwh:.2f}kWh without it"
+            )
+            return result
+        result["reason"] = (
+            f"No switch load drawing power to cut (projected {projected_kwh:.2f}kWh)"
+        )
+        return result
+
+    projected_kwh = current_hour_kwh + restore_power_kw * remaining_hours
+    off_loads = [
+        load
+        for load in ready
+        if load.current_switch_state != ("off" if load.switch_inverted else "on")
+    ]
+    for load in sorted(off_loads, key=lambda load: load.priority, reverse=True):
+        consuming_state = "off" if load.switch_inverted else "on"
+        if projected_kwh > hourly_set_point_kwh - SETPOINT_RESTORE_MARGIN_KWH:
+            result["reason"] = (
+                f"Keeping {load.name} off: projected {projected_kwh:.2f}kWh "
+                "without it"
+            )
+            return result
+        power_kw = _estimate_switch_consuming_power(load) or 0.0
+        plan = _build_horizon_plan(
+            load=load,
+            plan_type="switch",
+            current_load_power_kw=0.0,
+            candidate_load_power_kw=power_kw,
+            current_hour_kwh=current_hour_kwh,
+            house_power_kw=restore_power_kw,
+            remaining_hours=remaining_hours,
+            hourly_set_point_kwh=hourly_set_point_kwh,
+            new_value=consuming_state,
+            reduction_kw=0.0,
+        )
+        result["action"] = "restore"
+        result["candidate_projected_end_kwh"] = plan["candidate_projected_end_kwh"]
+        result["loads_to_restore"] = [plan]
+        result["reason"] = (
+            f"Restore {load.name}: projected {projected_kwh:.2f}kWh without it"
+        )
+        return result
+
+    result["reason"] = (
+        f"Switch loads stay as they are (projected {projected_kwh:.2f}kWh)"
+    )
+    return result
 
 
 def _calculate_horizon_decision(
@@ -961,6 +1154,11 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             hass, TRIM_STORAGE_VERSION, f"{DOMAIN}.{entry_id}.vehicle_trim"
         )
         self._trim_saved: dict[str, Any] | None = None
+        # Last value of each charger session energy sensor, to notice a replug
+        # the charger never reported as an unplug
+        self._charger_energy: dict[str, float] = {}
+        # House power not drawn by controlled loads over the last few minutes
+        self._uncontrolled_samples: deque[tuple[float, float]] = deque()
 
     def _load_config(self) -> None:
         """Load configuration and create Load objects."""
@@ -1150,6 +1348,8 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # Update runtime state to get current load states for capacity calculation
             self._update_loads_runtime_state()
+            if house_power_kw is not None:
+                self._record_uncontrolled_power(time.time(), house_power_kw)
 
             available_down_capacity_kw = calculate_available_down_capacity(self.loads)
 
@@ -1249,6 +1449,7 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             hourly_set_point_kwh=hourly_set_point_kwh,
             remaining_seconds=remaining_seconds,
             current_time=current_time,
+            uncontrolled_power_kw=self._uncontrolled_average(),
         )
 
         # Log decision details
@@ -1277,6 +1478,20 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             self.last_action = "No action"
             self.last_action_reason = decision["reason"]
+
+    def _record_uncontrolled_power(self, now: float, house_power_kw: float) -> None:
+        """Keep the house power not drawn by controlled loads for a few minutes."""
+        samples = self._uncontrolled_samples
+        samples.append((now, calculate_uncontrolled_power(self.loads, house_power_kw)))
+        while samples[0][0] < now - SETPOINT_AVERAGE_WINDOW:
+            samples.popleft()
+
+    def _uncontrolled_average(self) -> float | None:
+        """Average the recorded uncontrolled house power, if any."""
+        samples = self._uncontrolled_samples
+        if not samples:
+            return None
+        return sum(power for _, power in samples) / len(samples)
 
     async def async_restore_trim_state(self) -> None:
         """Restore the vehicle trim sessions saved before a restart."""
@@ -1326,6 +1541,16 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 continue
             session = self._trim_sessions.setdefault(load.name, VehicleTrimSession())
 
+            # A quick replug can fall between two reports of the charger, so
+            # its switch never shows the unplug. A new session still does.
+            if self._charger_session_restarted(load):
+                _LOGGER.info(
+                    "%s started a new charging session; looking for the vehicle again",
+                    load.name,
+                )
+                await self._async_end_trim_session(load, session, restore=False)
+                session = self._trim_sessions[load.name]
+
             # The charger switch is unavailable while no vehicle is plugged in.
             if load.current_switch_state is None:
                 session.unplugged_cycles += 1
@@ -1344,8 +1569,11 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             elif session.charging_since is None:
                 session.charging_since = now
             if session.ampere_entity_id is None:
+                # The charger's power must have settled, since the vehicle
+                # reports the power it draws once it has ramped up.
                 if (
                     charging
+                    and now - session.charging_since >= TRIM_IDENTIFY_SETTLE
                     and not session.failed
                     and session.attempts < TRIM_IDENTIFY_MAX_ATTEMPTS
                     and now - session.last_attempt_time >= TRIM_IDENTIFY_INTERVAL
@@ -1565,16 +1793,46 @@ class RvikRazorCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         session.ampere_entity_id = None
         session.status = f"Charge current command failed: {error}"
 
+    def _charger_session_restarted(self, load: Load) -> bool:
+        """Return whether the charger's session energy started again.
+
+        Some chargers correct their session energy down a little when charging
+        resumes, so only a drop to under half, by a clear amount, counts.
+        """
+        restarted = False
+        if not load.switch_entity_id:
+            return restarted
+        for entity_id in find_charger_energy_entities(self.hass, load.switch_entity_id):
+            state = self.hass.states.get(entity_id)
+            try:
+                energy_kwh = float(state.state)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if state.attributes.get("unit_of_measurement") == "Wh":
+                energy_kwh /= 1000.0
+            previous_kwh = self._charger_energy.get(entity_id)
+            self._charger_energy[entity_id] = energy_kwh
+            if (
+                previous_kwh is not None
+                and energy_kwh < previous_kwh / 2
+                and previous_kwh - energy_kwh >= TRIM_SESSION_RESET_KWH
+            ):
+                restarted = True
+        return restarted
+
     async def _async_end_trim_session(
-        self, load: Load, session: VehicleTrimSession
+        self, load: Load, session: VehicleTrimSession, restore: bool = True
     ) -> None:
         """Forget the bound vehicle once unplugged, restoring a lowered current.
 
         Vehicles remember their charge current per location, so a lowered
         current would otherwise apply to the next unmanaged charge at home.
+        After a replug the vehicle may be charging again, so its current is
+        left for trim to raise rather than set to the maximum unmanaged.
         """
         if (
-            session.ampere_entity_id is not None
+            restore
+            and session.ampere_entity_id is not None
             and session.lowered
             and session.ampere < session.max_ampere
         ):

@@ -19,7 +19,7 @@ The charger's own current setting was rejected. Zaptec asks for installation cur
 
 **Which vehicle is charging**
 
-Two vehicles share the charger, and neither the charger nor RVik Razor knows which one is plugged in. Once the charger draws at least 1 kW, RVik Razor refreshes the listed vehicles once. It binds the single vehicle that is all of:
+Two vehicles share the charger, and neither the charger nor RVik Razor knows which one is plugged in. Once the charger has drawn at least 1 kW for a minute, RVik Razor refreshes the listed vehicles once. It binds the single vehicle that is all of:
 
 - online;
 - charging;
@@ -27,6 +27,10 @@ Two vehicles share the charger, and neither the charger nor RVik Razor knows whi
 - reporting a charger power within 1.5 kW of the charger's measured power.
 
 No match, or more than one, leaves the load on on/off control. RVik Razor retries at most 3 times per plug-in, 5 minutes apart. After each reduction, the charger's measured power must drop within 2 minutes. If it does not, the bound vehicle is the wrong one, and trimming stops until the vehicle is unplugged.
+
+Before 1.3.6 the refresh came as soon as the charger drew 1 kW. On 27 Oct 2026 the first two attempts came while the charger ramped up, at 1.2 kW and 3.7 kW against the vehicle's 6 kW, and only the last attempt of the plug-in matched.
+
+A vehicle is unplugged when the charger switch is unavailable for two control cycles. The Zaptec integration reported nothing for 10 minutes on 27 Oct 2026, and a replug in that time never showed as an unplug. RVik Razor therefore also watches the energy sensors on the charger switch's device. The charger's session energy starts again at a new plug-in, so a drop to under half, by at least 0.5 kWh, ends the session as a replug. A lifetime energy meter never drops, and the Zaptec corrects its session energy down by 0.1–0.5 kWh when charging resumes, which is too little to count. After a replug a lowered current is not set back to 16 A, since the vehicle may already be charging again.
 
 **Consequences**
 

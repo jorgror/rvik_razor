@@ -17,6 +17,7 @@ RVik Razor automatically controls your EV charger and other loads to keep your *
 - **Power Projection**: Estimates end-of-hour energy usage based on current power consumption
 - **Automatic Load Control**: Reduces or restores loads when projected hourly consumption drifts from the set point
 - **Smart Restoration**: Restores loads only when they can stay restored to the end of the hour without reducing accuracy
+- **Switch loads stay on**: A water heater or heat pump is cut only when the hour cannot be held without it, not for a brief spike (see [Switch loads](#switch-loads))
 
 ### Supported Load Types
 1. **EV Charger (Ampere Control)**: Incrementally reduces charging amperage
@@ -113,6 +114,17 @@ projection_error_kwh = projected_end_kwh - hourly_set_point_kwh
    - 120-second cooldown per load between actions
    - Hour rollover detection and reset; control waits (up to 2 minutes) until the hour energy sensor has reset, since many meters reset it some seconds after the hour
 
+### Switch loads
+
+Switch loads that are not late-hour loads, such as a water heater or a heat pump, follow their own rule ([ADR 0004](docs/adr/0004-cut-switch-loads-only-when-needed.md)) instead of the accuracy rule above, which now applies to ampere loads only:
+
+- **Cut** the first load by priority only when the hour is projected over the set point and, without that load, would still end within 0.1 kWh of it.
+- **Never cut** a load drawing less than 0.1 kW, such as a heater whose thermostat is satisfied.
+- **Restore** a load, highest priority number first, once the hour without it is projected 0.2 kWh under the set point.
+- The rest of the house is projected without late-hour loads, which their own rule stops first. Its power is taken both now and averaged over 5 minutes: a cut needs both to be high, so a brief spike early in the hour cuts nothing, and a restore needs both to be low.
+
+Give a heat pump a longer timeout, for example 15–20 minutes, so its compressor is not cycled.
+
 ### Late-hour loads
 
 Switch loads marked **Run late in the hour** are left out of the set-point control above and follow their own rule ([ADR 0002](docs/adr/0002-run-binary-loads-late-in-the-hour.md)):
@@ -135,7 +147,7 @@ A late-hour charger can list the charge-current entities of the vehicles that ch
 
 Vehicles draw very different power per ampere on the same charger, and one vehicle can change rate between charging stretches or after a lower current. On one 3-phase charger, a Tesla drew about 0.67 kW/A after it was plugged in, and about 0.4 kW/A after its first lower current or pause. Once the current has been steady for a minute, RVik Razor measures the bound vehicle's kW per ampere from the charger's power, and measures again after each change. The next start after a pause uses the rate the vehicle last drew. The bound vehicle and its rate are kept across Home Assistant restarts. Until the first measurement, the load's **assumed power** is taken as its power at the maximum current, so set it for the most powerful vehicle (for example 11 kW).
 
-To find which vehicle is charging, RVik Razor refreshes the listed vehicles once the charger draws at least 1 kW. It binds the one vehicle that is online, charging, at `home` and reporting about the charger's measured power. With no clear match, it retries up to 3 times per plug-in, 5 minutes apart, and otherwise keeps on/off control.
+To find which vehicle is charging, RVik Razor refreshes the listed vehicles once the charger has drawn at least 1 kW for a minute. It binds the one vehicle that is online, charging, at `home` and reporting about the charger's measured power. With no clear match, it retries up to 3 times per plug-in, 5 minutes apart, and otherwise keeps on/off control.
 
 Vehicle commands are billed by Tesla's Fleet API, so:
 
@@ -144,6 +156,7 @@ Vehicle commands are billed by Tesla's Fleet API, so:
 - At most 150 commands are sent per day. With real consumption this was about 25–60 a day.
 - A command outside the range Home Assistant last read for the vehicle first refreshes the vehicle. A refresh while the charger is paused can leave a range of 0–5 A. If a command still fails, the load runs on/off at the vehicle's measured power until the vehicle is found again while it charges.
 - If the charger does not follow a lowered current within 2 minutes, RVik Razor assumes the wrong vehicle and keeps on/off control until it is unplugged.
+- A replug between two reports of the charger is noticed from the charger's session energy starting again, using any energy sensor on the charger switch's device. RVik Razor then looks for the vehicle again.
 - A lowered current is set back to 16 A when the vehicle is unplugged, since vehicles remember their current per location.
 
 The projected sensor shows the status in `vehicle_trim` and the number of commands sent today in `vehicle_commands_today`.

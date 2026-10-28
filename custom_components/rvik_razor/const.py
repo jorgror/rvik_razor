@@ -58,6 +58,12 @@ DEFAULT_LATE_OVERSHOOT_CAP_KWH = 0.2  # Max projected overshoot while running
 DEFAULT_LATE_MIN_ON = 300  # seconds
 DEFAULT_LATE_MIN_OFF = 300  # seconds
 
+# Set-point switch loads (see docs/adr/0004-cut-switch-loads-only-when-needed.md)
+SETPOINT_AVERAGE_WINDOW = 300  # seconds of uncontrolled house power averaged
+SETPOINT_CUT_MARGIN_KWH = 0.1  # Cut once the hour, without the load, comes this close
+SETPOINT_RESTORE_MARGIN_KWH = 0.2  # Restore once the hour, without the load, is this far under
+SETPOINT_IDLE_KW = 0.1  # A load drawing less is not cut
+
 # Vehicle amp trim for late-hour loads (see docs/adr/0003-trim-vehicle-charge-current.md)
 DEFAULT_TRIM_MIN_AMPERE = 6
 DEFAULT_TRIM_MAX_AMPERE = 16  # Charger installation limit
@@ -68,6 +74,8 @@ DEFAULT_TRIM_DAILY_COMMAND_BUDGET = 150  # Vehicle API commands per day
 TRIM_CHARGING_THRESHOLD_KW = 1.0  # Load power that counts as charging
 TRIM_IDENTIFY_INTERVAL = 300  # seconds between attempts to find the vehicle
 TRIM_IDENTIFY_MAX_ATTEMPTS = 3  # per plug-in session
+TRIM_IDENTIFY_SETTLE = 60  # seconds of charging before the vehicle is looked for
+TRIM_SESSION_RESET_KWH = 0.5  # Drop in the charger's session energy that means a replug
 TRIM_POWER_MATCH_KW = 1.5  # Max difference between vehicle and charger power
 TRIM_VERIFY_DELAY = 120  # seconds before checking that a reduction took effect
 TRIM_VERIFY_TOLERANCE_KW = 1.0  # Excess power that means the wrong vehicle
